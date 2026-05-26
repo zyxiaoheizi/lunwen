@@ -462,7 +462,7 @@ Input = h_ls_grid_ri, shape [N, 8, 14, 72]
 Label = h_true_grid_ri, shape [N, 8, 14, 72]
 ```
 
-服务器上生成论文规模数据。当前默认先跑最少导频 `8 pilots`：
+服务器上生成论文规模数据。当前默认先跑较少但更稳定的 `16 pilots`：
 
 ```bash
 bash scripts/server_generate_grid_datasets.sh
@@ -474,6 +474,13 @@ bash scripts/server_generate_grid_datasets.sh
 PILOTS=48 bash scripts/server_generate_grid_datasets.sh
 ```
 
+这些参数都可以在命令前覆盖：
+
+```bash
+PILOTS=24 TRAIN_SAMPLES=32000 VAL_SAMPLES=4000 TEST_SAMPLES=4000 bash scripts/server_generate_grid_datasets.sh
+PILOTS=16 SNR_MIN=5 SNR_MAX=25 MAX_DOPPLER_HZ=120 bash scripts/server_generate_grid_datasets.sh
+```
+
 默认会生成：
 
 ```text
@@ -481,7 +488,7 @@ Train: 32000, Rayleigh TDL-A
 Val: 4000, Rayleigh TDL-A
 Test: 4000, Rayleigh TDL-A
 Shift tests: TDL-B, TDL-C, Rician TDL-A
-File names include p8/p16/p24/p36/p48, for example grid_p8_tdl_a_train_32000.npz
+File names include p8/p16/p24/p36/p48, for example grid_p16_tdl_a_train_32000.npz
 ```
 
 ## 开源论文 CNN baseline
@@ -494,7 +501,7 @@ channelnet SRCNN + DnCNN，对齐 ChannelNet 的 SR + IR pipeline
 reesnet    残差 CNN / ReEsNet 风格，对比更强的 residual estimator
 ```
 
-服务器上训练这三个 baseline。默认读取 `8 pilots` 数据并保存验证集最优 checkpoint：
+服务器上训练这三个 baseline。默认读取 `16 pilots` 数据并保存验证集最优 checkpoint：
 
 ```bash
 bash scripts/server_train_open_cnn_baselines.sh
@@ -514,7 +521,9 @@ ReEsNet: 残差 CNN 端到端训练，作为强 residual estimator 对照
 SRCNN_EPOCHS = 120
 DNCNN_EPOCHS = 120
 REESNET_EPOCHS = 120
-CHANNELNET_FINE_TUNE_EPOCHS = 0
+CHANNELNET_FINE_TUNE_EPOCHS = 20
+EARLY_STOPPING_PATIENCE = 20
+EARLY_STOPPING_MIN_DELTA = 0
 ```
 
 默认模型超参：
@@ -529,6 +538,7 @@ SRCNN:
 ChannelNet:
   stage 1: load SRCNN best checkpoint
   stage 2: freeze SRCNN, train DnCNN depth=8, hidden=64
+  stage 3: joint fine-tune 20 epochs with lr=1e-4
   lr = 1e-3
 
 ReEsNet:
@@ -550,18 +560,41 @@ Common:
 CHANNELNET_FINE_TUNE_EPOCHS=20 bash scripts/server_train_open_cnn_baselines.sh
 ```
 
+如果只想跑 80 轮，并保持 20 轮早停：
+
+```bash
+PILOTS=16 EPOCHS=80 EARLY_STOPPING_PATIENCE=20 bash scripts/server_run_pilot_experiment.sh
+```
+
 如果要训练其他导频数量：
 
 ```bash
 PILOTS=48 SRCNN_EPOCHS=100 DNCNN_EPOCHS=100 REESNET_EPOCHS=100 bash scripts/server_train_open_cnn_baselines.sh
 ```
 
+也可以细调三个模型：
+
+```bash
+PILOTS=16 \
+SRCNN_EPOCHS=120 SRCNN_LR=1e-3 \
+DNCNN_EPOCHS=120 DNCNN_LR=1e-3 CHANNELNET_DEPTH=8 CHANNELNET_HIDDEN=64 \
+REESNET_EPOCHS=120 REESNET_LR=5e-4 REESNET_DEPTH=8 REESNET_HIDDEN=64 \
+BATCH_SIZE=128 NUM_WORKERS=2 \
+bash scripts/server_train_open_cnn_baselines.sh
+```
+
+一键跑完整导频实验：
+
+```bash
+PILOTS=16 EPOCHS=120 bash scripts/server_run_pilot_experiment.sh
+```
+
 或者单独训练：
 
 ```bash
-python scripts/train_grid_cnn.py --model srcnn --train data/grid/grid_p8_tdl_a_train_32000.npz --val data/grid/grid_p8_tdl_a_val_4000.npz --test data/grid/grid_p8_tdl_a_test_4000.npz
-python scripts/train_grid_cnn.py --model channelnet --train data/grid/grid_p8_tdl_a_train_32000.npz --val data/grid/grid_p8_tdl_a_val_4000.npz --test data/grid/grid_p8_tdl_a_test_4000.npz
-python scripts/train_grid_cnn.py --model reesnet --train data/grid/grid_p8_tdl_a_train_32000.npz --val data/grid/grid_p8_tdl_a_val_4000.npz --test data/grid/grid_p8_tdl_a_test_4000.npz
+python scripts/train_grid_cnn.py --model srcnn --train data/grid/grid_p16_tdl_a_train_32000.npz --val data/grid/grid_p16_tdl_a_val_4000.npz --test data/grid/grid_p16_tdl_a_test_4000.npz
+python scripts/train_channelnet_pipeline.py --train data/grid/grid_p16_tdl_a_train_32000.npz --val data/grid/grid_p16_tdl_a_val_4000.npz --test data/grid/grid_p16_tdl_a_test_4000.npz --srcnn-checkpoint outputs/p16/cnn_srcnn/srcnn_grid_best.pt
+python scripts/train_grid_cnn.py --model reesnet --train data/grid/grid_p16_tdl_a_train_32000.npz --val data/grid/grid_p16_tdl_a_val_4000.npz --test data/grid/grid_p16_tdl_a_test_4000.npz
 ```
 
 训练完成后，对比 LS、LMMSE、SRCNN、ChannelNet、ReEsNet 并画图：
@@ -579,9 +612,9 @@ PILOTS=48 bash scripts/server_compare_grid_methods.sh
 输出：
 
 ```text
-outputs/p8/comparison/grid_method_comparison.csv
-outputs/p8/comparison/grid_method_comparison.json
-outputs/p8/comparison/grid_method_comparison.png
+outputs/p16/comparison/grid_method_comparison.csv
+outputs/p16/comparison/grid_method_comparison.json
+outputs/p16/comparison/grid_method_comparison.png
 ```
 
 该脚本默认比较：

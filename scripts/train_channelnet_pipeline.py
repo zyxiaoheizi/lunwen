@@ -64,6 +64,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-key", default="h_true_grid_ri")
     parser.add_argument("--fine-tune-epochs", type=int, default=0)
     parser.add_argument("--fine-tune-lr", type=float, default=1e-4)
+    parser.add_argument("--early-stopping-patience", type=int, default=20)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     return parser.parse_args()
 
 
@@ -206,6 +208,9 @@ def main() -> None:
 
     rows: list[dict[str, float | int | str]] = []
     best_nmse = float("inf")
+    best_epoch = 0
+    best_stage = ""
+    epochs_without_improvement = 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -240,9 +245,22 @@ def main() -> None:
             f"dncnn epoch {epoch:03d} | train_loss={row['train_loss']:.6e} | "
             f"val_nmse={row['val_nmse_db']:.3f} dB"
         )
-        if val_metrics["nmse"] < best_nmse:
+        improved = val_metrics["nmse"] < best_nmse - args.early_stopping_min_delta
+        if improved:
             best_nmse = val_metrics["nmse"]
+            best_epoch = epoch
+            best_stage = "dncnn"
+            epochs_without_improvement = 0
             save_checkpoint(best_path, model, args, scale, in_channels, best_nmse)
+        else:
+            epochs_without_improvement += 1
+
+        if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+            print(
+                f"dncnn early stop at epoch {epoch}: best_stage={best_stage}, "
+                f"best_epoch={best_epoch}, best_val_nmse={nmse_db_from_linear(best_nmse):.3f} dB"
+            )
+            break
 
     if args.fine_tune_epochs > 0:
         checkpoint = torch.load(best_path, map_location=device, weights_only=True)
@@ -250,6 +268,7 @@ def main() -> None:
         set_srcnn_trainable(model, True)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.fine_tune_lr, weight_decay=args.weight_decay)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.fine_tune_epochs, 1))
+        epochs_without_improvement = 0
         for epoch in range(1, args.fine_tune_epochs + 1):
             model.train()
             train_loss = 0.0
@@ -282,9 +301,22 @@ def main() -> None:
                 f"finetune epoch {epoch:03d} | train_loss={row['train_loss']:.6e} | "
                 f"val_nmse={row['val_nmse_db']:.3f} dB"
             )
-            if val_metrics["nmse"] < best_nmse:
+            improved = val_metrics["nmse"] < best_nmse - args.early_stopping_min_delta
+            if improved:
                 best_nmse = val_metrics["nmse"]
+                best_epoch = epoch
+                best_stage = "finetune"
+                epochs_without_improvement = 0
                 save_checkpoint(best_path, model, args, scale, in_channels, best_nmse)
+            else:
+                epochs_without_improvement += 1
+
+            if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+                print(
+                    f"finetune early stop at epoch {epoch}: best_stage={best_stage}, "
+                    f"best_epoch={best_epoch}, best_val_nmse={nmse_db_from_linear(best_nmse):.3f} dB"
+                )
+                break
 
     torch.save({"model": model.state_dict(), "args": serializable_args(args), "scale": scale}, last_path)
     write_metrics(metrics_path, rows)
@@ -314,6 +346,10 @@ def main() -> None:
         "srcnn_checkpoint": str(args.srcnn_checkpoint),
         "best_val_nmse": best_nmse,
         "best_val_nmse_db": nmse_db_from_linear(best_nmse),
+        "best_epoch": best_epoch,
+        "best_stage": best_stage,
+        "early_stopping_patience": args.early_stopping_patience,
+        "early_stopping_min_delta": args.early_stopping_min_delta,
         "best_checkpoint": str(best_path),
         "last_checkpoint": str(last_path),
         "metrics_csv": str(metrics_path),

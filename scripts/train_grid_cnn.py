@@ -61,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-key", default="h_ls_grid_ri")
     parser.add_argument("--target-key", default="h_true_grid_ri")
     parser.add_argument("--no-normalize", action="store_true")
+    parser.add_argument("--early-stopping-patience", type=int, default=20)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     return parser.parse_args()
 
 
@@ -163,6 +165,8 @@ def main() -> None:
 
     rows: list[dict[str, float | int | str]] = []
     best_nmse = float("inf")
+    best_epoch = 0
+    epochs_without_improvement = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
@@ -195,8 +199,11 @@ def main() -> None:
             f"val_nmse={row['val_nmse_db']:.3f} dB"
         )
 
-        if val_metrics["nmse"] < best_nmse:
+        improved = val_metrics["nmse"] < best_nmse - args.early_stopping_min_delta
+        if improved:
             best_nmse = val_metrics["nmse"]
+            best_epoch = epoch
+            epochs_without_improvement = 0
             torch.save(
                 {
                     "model": model.state_dict(),
@@ -208,6 +215,15 @@ def main() -> None:
                 },
                 best_path,
             )
+        else:
+            epochs_without_improvement += 1
+
+        if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+            print(
+                f"early stop at epoch {epoch}: best_epoch={best_epoch}, "
+                f"best_val_nmse={nmse_db_from_linear(best_nmse):.3f} dB"
+            )
+            break
 
     torch.save({"model": model.state_dict(), "args": serializable_args(args), "scale": scale}, last_path)
     write_metrics(metrics_path, rows)
@@ -235,6 +251,9 @@ def main() -> None:
         "scale": scale,
         "best_val_nmse": best_nmse,
         "best_val_nmse_db": nmse_db_from_linear(best_nmse),
+        "best_epoch": best_epoch,
+        "early_stopping_patience": args.early_stopping_patience,
+        "early_stopping_min_delta": args.early_stopping_min_delta,
         "best_checkpoint": str(best_path),
         "last_checkpoint": str(last_path),
         "metrics_csv": str(metrics_path),
