@@ -43,6 +43,36 @@ class ResidualGridCNN(nn.Module):
         return x + residual
 
 
+class SimpleGridCNN(nn.Module):
+    """简易 CNN baseline：多层 3x3 卷积直接学习 LS 插值误差。
+
+    这是论文里常见的 plain CNN / denoising CNN 对照组，比 ChannelNet
+    简单很多，用来说明“不是随便一个 CNN 都能达到 ChannelNet/残差网络效果”。
+    """
+
+    def __init__(self, in_channels: int = 8, hidden_channels: int = 64, depth: int = 5) -> None:
+        super().__init__()
+        if depth < 3:
+            raise ValueError("simplecnn depth must be at least 3.")
+
+        layers: list[nn.Module] = [
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        ]
+        for _ in range(depth - 2):
+            layers.extend(
+                [
+                    nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+                    nn.ReLU(inplace=True),
+                ]
+            )
+        layers.append(nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
 class ChannelNetStyleCNN(nn.Module):
     """ChannelNet-style baseline: SRCNN reconstruction + DnCNN denoising.
 
@@ -135,7 +165,9 @@ class DnCNNGrid(nn.Module):
 
 def build_model(name: str, in_channels: int = 8, hidden_channels: int = 64, depth: int = 6) -> nn.Module:
     normalized = name.lower()
-    if normalized == "rescnn":
+    if normalized in {"simplecnn", "simple"}:
+        return SimpleGridCNN(in_channels=in_channels, hidden_channels=hidden_channels, depth=depth)
+    if normalized in {"rescnn", "reesnet"}:
         return ResidualGridCNN(in_channels=in_channels, hidden_channels=hidden_channels, depth=depth)
     if normalized == "srcnn":
         return SRCNNGrid(in_channels=in_channels)
@@ -143,7 +175,9 @@ def build_model(name: str, in_channels: int = 8, hidden_channels: int = 64, dept
         return DnCNNGrid(in_channels=in_channels, hidden_channels=hidden_channels, depth=depth)
     if normalized == "channelnet":
         return ChannelNetStyleCNN(in_channels=in_channels, hidden_channels=hidden_channels, denoise_depth=depth)
-    raise ValueError(f"Unknown model: {name}. Choose 'rescnn', 'srcnn', 'dncnn', or 'channelnet'.")
+    raise ValueError(
+        f"Unknown model: {name}. Choose 'simplecnn', 'reesnet', 'rescnn', 'srcnn', 'dncnn', or 'channelnet'."
+    )
 
 
 def count_parameters(model: nn.Module) -> int:

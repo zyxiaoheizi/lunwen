@@ -456,16 +456,22 @@ python scripts/generate_grid_dataset.py --samples 5000 --profile tdl-a --num-pil
 ```text
 OFDM symbols = 14
 Subcarriers = 72
-Pilots = 48
+Pilots = 8/16/24/36/48
 MIMO = 2x2
 Input = h_ls_grid_ri, shape [N, 8, 14, 72]
 Label = h_true_grid_ri, shape [N, 8, 14, 72]
 ```
 
-服务器上生成论文规模数据：
+服务器上生成论文规模数据。当前默认先跑最少导频 `8 pilots`：
 
 ```bash
 bash scripts/server_generate_grid_datasets.sh
+```
+
+如果要复现实验里原来的 `48 pilots`，可以显式指定：
+
+```bash
+PILOTS=48 bash scripts/server_generate_grid_datasets.sh
 ```
 
 默认会生成：
@@ -475,42 +481,107 @@ Train: 32000, Rayleigh TDL-A
 Val: 4000, Rayleigh TDL-A
 Test: 4000, Rayleigh TDL-A
 Shift tests: TDL-B, TDL-C, Rician TDL-A
+File names include p8/p16/p24/p36/p48, for example grid_p8_tdl_a_train_32000.npz
 ```
 
 ## 开源论文 CNN baseline
 
-已加入两个和开源论文代码对齐的 CNN baseline：
+已加入三个论文对齐的 CNN baseline：
 
 ```text
 srcnn      ChannelNet / DeepPilotDesign 中的 SRCNN 超分辨率模块
 channelnet SRCNN + DnCNN，对齐 ChannelNet 的 SR + IR pipeline
+reesnet    残差 CNN / ReEsNet 风格，对比更强的 residual estimator
 ```
 
-服务器上训练这两个 baseline：
+服务器上训练这三个 baseline。默认读取 `8 pilots` 数据并保存验证集最优 checkpoint：
 
 ```bash
 bash scripts/server_train_open_cnn_baselines.sh
 ```
 
+训练方式按论文代码习惯拆开：
+
+```text
+SRCNN: 单独训练，学习从 LS 插值图恢复信道图
+ChannelNet: 先加载 SRCNN best，再固定 SRCNN 训练 DnCNN 去噪模块
+ReEsNet: 残差 CNN 端到端训练，作为强 residual estimator 对照
+```
+
+默认轮数：
+
+```text
+SRCNN_EPOCHS = 120
+DNCNN_EPOCHS = 120
+REESNET_EPOCHS = 120
+CHANNELNET_FINE_TUNE_EPOCHS = 0
+```
+
+默认模型超参：
+
+```text
+SRCNN:
+  9x9 Conv(8->64) + ReLU
+  1x1 Conv(64->32) + ReLU
+  5x5 Conv(32->8)
+  lr = 1e-3
+
+ChannelNet:
+  stage 1: load SRCNN best checkpoint
+  stage 2: freeze SRCNN, train DnCNN depth=8, hidden=64
+  lr = 1e-3
+
+ReEsNet:
+  residual blocks = 8
+  hidden channels = 64
+  lr = 5e-4
+
+Common:
+  batch_size = 128
+  optimizer = AdamW
+  weight_decay = 1e-5
+  scheduler = CosineAnnealingLR
+  checkpoint = validation NMSE best
+```
+
+如果要加一个很短的 ChannelNet 联合微调阶段：
+
+```bash
+CHANNELNET_FINE_TUNE_EPOCHS=20 bash scripts/server_train_open_cnn_baselines.sh
+```
+
+如果要训练其他导频数量：
+
+```bash
+PILOTS=48 SRCNN_EPOCHS=100 DNCNN_EPOCHS=100 REESNET_EPOCHS=100 bash scripts/server_train_open_cnn_baselines.sh
+```
+
 或者单独训练：
 
 ```bash
-python scripts/train_grid_cnn.py --model srcnn --train data/grid/grid_tdl_a_train_32000.npz --val data/grid/grid_tdl_a_val_4000.npz --test data/grid/grid_tdl_a_test_4000.npz
-python scripts/train_grid_cnn.py --model channelnet --train data/grid/grid_tdl_a_train_32000.npz --val data/grid/grid_tdl_a_val_4000.npz --test data/grid/grid_tdl_a_test_4000.npz
+python scripts/train_grid_cnn.py --model srcnn --train data/grid/grid_p8_tdl_a_train_32000.npz --val data/grid/grid_p8_tdl_a_val_4000.npz --test data/grid/grid_p8_tdl_a_test_4000.npz
+python scripts/train_grid_cnn.py --model channelnet --train data/grid/grid_p8_tdl_a_train_32000.npz --val data/grid/grid_p8_tdl_a_val_4000.npz --test data/grid/grid_p8_tdl_a_test_4000.npz
+python scripts/train_grid_cnn.py --model reesnet --train data/grid/grid_p8_tdl_a_train_32000.npz --val data/grid/grid_p8_tdl_a_val_4000.npz --test data/grid/grid_p8_tdl_a_test_4000.npz
 ```
 
-训练完成后，对比 LS、SRCNN、ChannelNet 并画图：
+训练完成后，对比 LS、LMMSE、SRCNN、ChannelNet、ReEsNet 并画图：
 
 ```bash
 bash scripts/server_compare_grid_methods.sh
 ```
 
+其他导频数量同样用 `PILOTS` 指定：
+
+```bash
+PILOTS=48 bash scripts/server_compare_grid_methods.sh
+```
+
 输出：
 
 ```text
-outputs/comparison/grid_method_comparison.csv
-outputs/comparison/grid_method_comparison.json
-outputs/comparison/grid_method_comparison.png
+outputs/p8/comparison/grid_method_comparison.csv
+outputs/p8/comparison/grid_method_comparison.json
+outputs/p8/comparison/grid_method_comparison.png
 ```
 
 该脚本默认比较：
@@ -522,4 +593,5 @@ Oracle 2D LMMSE
 Mismatched 2D LMMSE (默认假设 TDL-A)
 SRCNN
 ChannelNet
+ReEsNet
 ```
