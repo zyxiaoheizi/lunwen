@@ -498,3 +498,28 @@ bash scripts/server_train_open_cnn_baselines.sh
 python scripts/train_grid_cnn.py --model srcnn --train data/grid/grid_tdl_a_train_32000.npz --val data/grid/grid_tdl_a_val_4000.npz --test data/grid/grid_tdl_a_test_4000.npz
 python scripts/train_grid_cnn.py --model channelnet --train data/grid/grid_tdl_a_train_32000.npz --val data/grid/grid_tdl_a_val_4000.npz --test data/grid/grid_tdl_a_test_4000.npz
 ```
+
+训练完成后，对比 LS、SRCNN、ChannelNet 并画图：
+
+```bash
+bash scripts/server_compare_grid_methods.sh
+```
+
+输出：
+
+```text
+outputs/comparison/grid_method_comparison.csv
+outputs/comparison/grid_method_comparison.json
+outputs/comparison/grid_method_comparison.png
+```
+
+该脚本默认比较：
+
+```text
+LS + 2D interpolation
+Empirical 2D LMMSE (用训练集估计协方差，非 oracle)
+Oracle 2D LMMSE
+Mismatched 2D LMMSE (默认假设 TDL-A)
+SRCNN
+ChannelNet
+```
