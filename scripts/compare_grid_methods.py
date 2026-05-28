@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Dataset
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from adapter_mimo_ofdm.models import build_model, count_parameters  # noqa: E402
+from adapter_mimo_ofdm.models import PilotLockedErrorRefinementNet, build_model, count_parameters  # noqa: E402
 from adapter_mimo_ofdm.sim import resolve_delay_profile  # noqa: E402
 
 
@@ -242,6 +242,31 @@ def torch_nmse(
 
 def load_model_from_checkpoint(path: Path, device: torch.device) -> tuple[str, torch.nn.Module, float, int]:
     checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if checkpoint.get("model_type") == "plern":
+        base_meta = checkpoint["base_model"]
+        base_model_name = str(base_meta["model"])
+        in_channels = int(checkpoint.get("in_channels", 8))
+        base_hidden_channels = int(base_meta.get("hidden_channels", 64))
+        base_depth = int(base_meta.get("depth", 6))
+        refiner_hidden_channels = int(checkpoint.get("refiner_hidden_channels", 64))
+        refiner_depth = int(checkpoint.get("refiner_depth", 4))
+        pilot_mask = checkpoint.get("pilot_mask")
+        if pilot_mask is None:
+            pilot_mask = checkpoint["model"].get("pilot_mask")
+        base_model = build_model(base_model_name, in_channels, base_hidden_channels, base_depth).to(device)
+        model = PilotLockedErrorRefinementNet(
+            base_model=base_model,
+            in_channels=in_channels,
+            hidden_channels=refiner_hidden_channels,
+            depth=refiner_depth,
+            pilot_mask=pilot_mask,
+            freeze_base=True,
+        ).to(device)
+        model.load_state_dict(checkpoint["model"])
+        scale = float(checkpoint.get("scale", 1.0))
+        params = int(checkpoint.get("param_count", count_parameters(model)))
+        return "plern", model, scale, params
+
     args = checkpoint.get("args", {})
     model_name = str(args.get("model", path.stem.split("_")[0]))
     in_channels = int(checkpoint.get("in_channels", 8))

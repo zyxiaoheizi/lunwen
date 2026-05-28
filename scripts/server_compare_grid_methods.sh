@@ -29,6 +29,12 @@ fi
 if [[ -f "${OUT_ROOT}/cnn_reesnet/reesnet_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "ReEsNet=${OUT_ROOT}/cnn_reesnet/reesnet_grid_best.pt")
 fi
+if [[ -f "${OUT_ROOT}/pl_ern_reesnet/plern_grid_best.pt" ]]; then
+  CHECKPOINTS+=(--checkpoint "PL-ERN(ReEsNet)=${OUT_ROOT}/pl_ern_reesnet/plern_grid_best.pt")
+fi
+if [[ -f "${OUT_ROOT}/pl_ern_channelnet/plern_grid_best.pt" ]]; then
+  CHECKPOINTS+=(--checkpoint "PL-ERN(ChannelNet)=${OUT_ROOT}/pl_ern_channelnet/plern_grid_best.pt")
+fi
 
 LMMSE_ARGS=(
   --include-oracle-lmmse

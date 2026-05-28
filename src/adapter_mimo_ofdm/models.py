@@ -163,6 +163,75 @@ class DnCNNGrid(nn.Module):
         return x - estimated_noise
 
 
+class ErrorRefinerCNN(nn.Module):
+    """Residual error-field predictor used after a frozen base estimator.
+
+    The refiner sees the interpolated LS grid, the base estimate, and the
+    pilot mask. It only predicts the remaining structured error field.
+    """
+
+    def __init__(self, in_channels: int = 8, hidden_channels: int = 64, depth: int = 6) -> None:
+        super().__init__()
+        if depth < 1:
+            raise ValueError("ErrorRefinerCNN depth must be at least 1.")
+        refiner_in_channels = 2 * in_channels + 1
+        self.head = nn.Sequential(
+            nn.Conv2d(refiner_in_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.body = nn.Sequential(*[ResidualBlock2D(hidden_channels) for _ in range(depth)])
+        self.tail = nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
+        nn.init.zeros_(self.tail.weight)
+        nn.init.zeros_(self.tail.bias)
+
+    def forward(self, ls_grid: torch.Tensor, base_estimate: torch.Tensor, pilot_mask: torch.Tensor) -> torch.Tensor:
+        if pilot_mask.ndim == 2:
+            pilot_mask = pilot_mask.view(1, 1, pilot_mask.shape[0], pilot_mask.shape[1])
+        if pilot_mask.shape[0] == 1:
+            pilot_mask = pilot_mask.expand(ls_grid.shape[0], -1, -1, -1)
+        features = torch.cat((ls_grid, base_estimate, pilot_mask.to(dtype=ls_grid.dtype)), dim=1)
+        return self.tail(self.body(self.head(features)))
+
+
+class PilotLockedErrorRefinementNet(nn.Module):
+    """Pilot-locked error refinement model.
+
+    A pretrained base estimator first produces H_base. A small refiner then
+    predicts E_hat, and the final estimate is H_base + E_hat.
+    """
+
+    def __init__(
+        self,
+        base_model: nn.Module,
+        in_channels: int = 8,
+        hidden_channels: int = 64,
+        depth: int = 6,
+        pilot_mask: torch.Tensor | None = None,
+        freeze_base: bool = True,
+    ) -> None:
+        super().__init__()
+        self.base_model = base_model
+        self.refiner = ErrorRefinerCNN(in_channels=in_channels, hidden_channels=hidden_channels, depth=depth)
+        if pilot_mask is None:
+            pilot_mask = torch.zeros(1, 1, 1, 1)
+        if pilot_mask.ndim == 2:
+            pilot_mask = pilot_mask.view(1, 1, pilot_mask.shape[0], pilot_mask.shape[1])
+        self.register_buffer("pilot_mask", pilot_mask.float())
+        self.freeze_base = freeze_base
+        if freeze_base:
+            for parameter in self.base_model.parameters():
+                parameter.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.freeze_base:
+            with torch.no_grad():
+                base_estimate = self.base_model(x)
+        else:
+            base_estimate = self.base_model(x)
+        residual = self.refiner(x, base_estimate.detach() if self.freeze_base else base_estimate, self.pilot_mask)
+        return base_estimate + residual
+
+
 def build_model(name: str, in_channels: int = 8, hidden_channels: int = 64, depth: int = 6) -> nn.Module:
     normalized = name.lower()
     if normalized in {"simplecnn", "simple"}:
