@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--hidden-channels", type=int, default=64)
     parser.add_argument("--depth", type=int, default=4)
-    parser.add_argument("--lambda-pilot", type=float, default=0.02)
+    parser.add_argument("--lambda-pilot", type=float, default=0.0)
     parser.add_argument("--lambda-residual", type=float, default=1e-4)
     parser.add_argument("--unfreeze-base", action="store_true")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -267,9 +267,31 @@ def main() -> None:
     print(f"lambda_pilot={args.lambda_pilot}, lambda_residual={args.lambda_residual}")
 
     rows: list[dict[str, float | int | str]] = []
-    best_nmse = float("inf")
+    initial_metrics = evaluate(model, val_loader, device, criterion)
+    best_nmse = initial_metrics["nmse"]
     best_epoch = 0
     epochs_without_improvement = 0
+    rows.append(
+        {
+            "epoch": 0,
+            "lr": optimizer.param_groups[0]["lr"],
+            "train_loss": float("nan"),
+            "train_fit_loss": float("nan"),
+            "train_pilot_loss": float("nan"),
+            "train_residual_loss": float("nan"),
+            "val_loss": initial_metrics["loss"],
+            "val_nmse": initial_metrics["nmse"],
+            "val_nmse_db": initial_metrics["nmse_db"],
+            "val_base_nmse_db": initial_metrics["base_nmse_db"],
+            "val_pilot_loss": initial_metrics["pilot_loss"],
+        }
+    )
+    save_checkpoint(best_path, model, args, base_meta, scale, in_channels, best_nmse)
+    print(
+        f"epoch 000 | val_nmse={initial_metrics['nmse_db']:.3f} dB | "
+        f"base={initial_metrics['base_nmse_db']:.3f} dB"
+    )
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         if model.freeze_base:
