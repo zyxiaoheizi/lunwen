@@ -394,39 +394,6 @@ def pilot_mask_2d(n_symbols: int, n_subcarriers: int, positions: Array) -> Array
     return mask
 
 
-def exponential_spatial_correlation(n_antennas: int, rho: float) -> Array:
-    """Exponential Tx/Rx antenna correlation matrix used by Kronecker MIMO."""
-
-    rho = float(rho)
-    if not 0.0 <= rho < 1.0:
-        raise ValueError("spatial correlation rho must be in [0, 1).")
-    indices = np.arange(n_antennas, dtype=np.float64)
-    return (rho ** np.abs(indices[:, None] - indices[None, :])).astype(np.complex128)
-
-
-def psd_matrix_sqrt(matrix: Array) -> Array:
-    """Hermitian positive-semidefinite matrix square root."""
-
-    if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError("matrix must be square.")
-    values, vectors = np.linalg.eigh(matrix.astype(np.complex128))
-    values = np.clip(values.real, 0.0, None)
-    return (vectors * np.sqrt(values)[None, :]) @ vectors.conj().T
-
-
-def apply_kronecker_spatial_correlation(h: Array, tx_corr_rho: float = 0.0, rx_corr_rho: float = 0.0) -> Array:
-    """Apply H_corr = R_rx^(1/2) H_iid R_tx^(1/2) to the last two MIMO axes."""
-
-    if tx_corr_rho <= 0.0 and rx_corr_rho <= 0.0:
-        return h.astype(np.complex64, copy=False)
-    n_rx = h.shape[-2]
-    n_tx = h.shape[-1]
-    rx_sqrt = psd_matrix_sqrt(exponential_spatial_correlation(n_rx, rx_corr_rho))
-    tx_sqrt = psd_matrix_sqrt(exponential_spatial_correlation(n_tx, tx_corr_rho))
-    correlated = np.einsum("ri,...ij,tj->...rt", rx_sqrt, h.astype(np.complex128), tx_sqrt)
-    return correlated.astype(np.complex64)
-
-
 def generate_frequency_channel(
     rng: np.random.Generator,
     n_frames: int,
@@ -437,8 +404,6 @@ def generate_frequency_channel(
     subcarrier_spacing_hz: float,
     channel_model: str = "rayleigh",
     rician_k: float = 5.0,
-    tx_corr_rho: float = 0.0,
-    rx_corr_rho: float = 0.0,
     center_subcarriers: bool = True,
 ) -> Array:
     """Generate H[k] with shape [batch, subcarrier, rx, tx]."""
@@ -466,7 +431,7 @@ def generate_frequency_channel(
     freqs = subcarrier_ids * subcarrier_spacing_hz
     phase = np.exp(-1j * 2.0 * np.pi * freqs[:, None] * profile.delays_sec[None, :])
     freq = np.einsum("brtl,kl->bkrt", taps, phase)
-    return apply_kronecker_spatial_correlation(freq, tx_corr_rho=tx_corr_rho, rx_corr_rho=rx_corr_rho)
+    return freq.astype(np.complex64)
 
 
 def generate_time_frequency_channel(
@@ -481,8 +446,6 @@ def generate_time_frequency_channel(
     channel_model: str = "rayleigh",
     rician_k: float = 5.0,
     max_doppler_hz: float = 0.0,
-    tx_corr_rho: float = 0.0,
-    rx_corr_rho: float = 0.0,
     center_subcarriers: bool = True,
 ) -> Array:
     """生成二维时频 MIMO 信道，shape 为 [batch, symbol, subcarrier, rx, tx]。
@@ -530,7 +493,7 @@ def generate_time_frequency_channel(
     freqs = subcarrier_ids * subcarrier_spacing_hz
     phase = np.exp(-1j * 2.0 * np.pi * freqs[:, None] * profile.delays_sec[None, :])
     freq = np.einsum("bsrtl,kl->bskrt", taps, phase)
-    return apply_kronecker_spatial_correlation(freq, tx_corr_rho=tx_corr_rho, rx_corr_rho=rx_corr_rho)
+    return freq.astype(np.complex64)
 
 
 def orthogonal_pilot_matrix(n_pilot_subcarriers: int, n_tx: int) -> Array:
@@ -821,8 +784,6 @@ def generate_dataset(
     channel_model: str = "rayleigh",
     rician_k: float = 5.0,
     pdp_decay: float = 1.5,
-    tx_corr_rho: float = 0.0,
-    rx_corr_rho: float = 0.0,
     seed: int = 2026,
 ) -> Path:
     rng = np.random.default_rng(seed)
@@ -845,8 +806,6 @@ def generate_dataset(
         subcarrier_spacing_hz=subcarrier_spacing_hz,
         channel_model=channel_model,
         rician_k=rician_k,
-        tx_corr_rho=tx_corr_rho,
-        rx_corr_rho=rx_corr_rho,
     )
 
     snr_db = rng.uniform(snr_min_db, snr_max_db, size=samples).astype(np.float32)
@@ -881,8 +840,6 @@ def generate_dataset(
         pilot_ratio=np.float32(pilot_ratio),
         channel_profile=np.array(profile.name),
         channel_model=np.array(channel_model),
-        tx_corr_rho=np.float64(tx_corr_rho),
-        rx_corr_rho=np.float64(rx_corr_rho),
     )
     return out
 
@@ -905,8 +862,6 @@ def generate_grid_dataset(
     rician_k: float = 5.0,
     max_doppler_hz: float = 70.0,
     pdp_decay: float = 1.5,
-    tx_corr_rho: float = 0.0,
-    rx_corr_rho: float = 0.0,
     seed: int = 2027,
 ) -> Path:
     """生成 ChannelNet-style 二维时频信道估计数据集。
@@ -938,8 +893,6 @@ def generate_grid_dataset(
         channel_model=channel_model,
         rician_k=rician_k,
         max_doppler_hz=max_doppler_hz,
-        tx_corr_rho=tx_corr_rho,
-        rx_corr_rho=rx_corr_rho,
     )
 
     snr_db = rng.uniform(snr_min_db, snr_max_db, size=samples).astype(np.float32)
@@ -975,8 +928,6 @@ def generate_grid_dataset(
         max_doppler_hz=np.float64(max_doppler_hz),
         channel_profile=np.array(profile.name),
         channel_model=np.array(channel_model),
-        tx_corr_rho=np.float64(tx_corr_rho),
-        rx_corr_rho=np.float64(rx_corr_rho),
     )
     return out
 

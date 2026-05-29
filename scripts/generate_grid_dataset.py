@@ -34,8 +34,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--channel", choices=["rayleigh", "rician"], default="rayleigh")
     parser.add_argument("--rician-k", type=float, default=5.0)
     parser.add_argument("--max-doppler-hz", type=float, default=70.0)
-    parser.add_argument("--tx-corr-rho", type=float, default=0.0)
-    parser.add_argument("--rx-corr-rho", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=2027)
     return parser.parse_args()
 
@@ -59,8 +57,6 @@ def main() -> None:
         channel_model=args.channel,
         rician_k=args.rician_k,
         max_doppler_hz=args.max_doppler_hz,
-        tx_corr_rho=args.tx_corr_rho,
-        rx_corr_rho=args.rx_corr_rho,
         seed=args.seed,
     )
     print(f"Saved 2D grid dataset: {out}")
