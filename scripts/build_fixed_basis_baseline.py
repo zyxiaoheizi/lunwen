@@ -95,6 +95,11 @@ def main() -> None:
     n_symbols = int(train_set.target.shape[2])
     n_subcarriers = int(train_set.target.shape[3])
     pilot_positions = torch.from_numpy(train_set.pilot_positions)
+    if args.num_basis > int(pilot_positions.shape[0]):
+        print(
+            "warning: num_basis is larger than the number of pilots; "
+            "fixed ridge fitting is underdetermined. Consider NUM_BASIS<=PILOTS or a larger REGULARIZATION."
+        )
 
     if args.basis_init == "pca":
         basis = pca_basis_from_training_file(

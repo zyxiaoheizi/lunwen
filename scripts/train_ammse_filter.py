@@ -36,6 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-6)
     parser.add_argument("--rank", type=int, default=0, help="0 means full learned W; positive values use low-rank W.")
+    parser.add_argument("--init-lmmse", action="store_true", help="Initialize full W from the training-set LMMSE solution.")
+    parser.add_argument("--lmmse-regularization", type=float, default=1e-4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--outdir", type=Path, default=ROOT / "outputs" / "ammse_filter")
@@ -46,6 +48,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     return parser.parse_args()
+
+
+def initialize_full_filter_from_lmmse(
+    model: AdaptiveMMSELinearFilterNet,
+    train_path: Path,
+    scale: float,
+    lmmse_regularization: float,
+    pilot_key: str,
+) -> None:
+    if model.rank > 0:
+        raise ValueError("--init-lmmse currently supports only full-rank A-MMSE-like filters with rank=0.")
+    data = np.load(train_path)
+    h_pilot = data[pilot_key].astype(np.complex64) / np.float32(scale)
+    h_grid = data["h_true_grid"].astype(np.complex64) / np.float32(scale)
+    n_samples, n_symbols, n_subcarriers, n_rx, n_tx = h_grid.shape
+    num_pilots = h_pilot.shape[1]
+    grid_size = n_symbols * n_subcarriers
+
+    x = np.transpose(h_pilot, (0, 2, 3, 1)).reshape(-1, num_pilots).astype(np.complex128)
+    y = np.transpose(h_grid, (0, 3, 4, 1, 2)).reshape(-1, grid_size).astype(np.complex128)
+    gram = x.conj().T @ x
+    gram = gram + float(lmmse_regularization) * np.eye(num_pilots, dtype=np.complex128)
+    rhs = x.conj().T @ y
+    coefficients = np.linalg.solve(gram, rhs)
+    weight = coefficients.T.astype(np.complex64)
+    with torch.no_grad():
+        model.filter[0].copy_(torch.from_numpy(weight.real).to(device=model.filter.device, dtype=model.filter.dtype))
+        model.filter[1].copy_(torch.from_numpy(weight.imag).to(device=model.filter.device, dtype=model.filter.dtype))
 
 
 def save_checkpoint(
@@ -134,11 +164,38 @@ def main() -> None:
     print(f"model=ammse_filter, params={count_parameters(model)}, rank={'full' if args.rank <= 0 else args.rank}")
     print(f"train={args.train}, val={args.val}, scale={scale:.6g}")
     print(f"epochs={args.epochs}, batch_size={args.batch_size}, lr={args.lr}, weight_decay={args.weight_decay}")
+    if args.init_lmmse:
+        print(f"initializing A-MMSE-like filter from sample LMMSE: regularization={args.lmmse_regularization}")
+        initialize_full_filter_from_lmmse(model, args.train, scale, args.lmmse_regularization, args.pilot_key)
 
     rows: list[dict[str, float | int | str]] = []
-    best_nmse = float("inf")
+    val_metrics = evaluate(model, val_loader, device, criterion)
+    best_nmse = val_metrics["nmse"]
     best_epoch = 0
     epochs_without_improvement = 0
+    rows.append(
+        {
+            "epoch": 0,
+            "lr": optimizer.param_groups[0]["lr"],
+            "train_loss": 0.0,
+            "val_loss": val_metrics["loss"],
+            "val_nmse": val_metrics["nmse"],
+            "val_nmse_db": val_metrics["nmse_db"],
+        }
+    )
+    print(f"epoch 000 | val_nmse={val_metrics['nmse_db']:.3f} dB")
+    save_checkpoint(
+        best_path,
+        model,
+        args,
+        scale,
+        n_rx,
+        n_tx,
+        n_symbols,
+        n_subcarriers,
+        pilot_positions,
+        best_nmse,
+    )
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
@@ -215,20 +272,6 @@ def main() -> None:
         best_nmse,
     )
     write_metrics(metrics_path, rows)
-
-    if best_epoch == 0:
-        save_checkpoint(
-            best_path,
-            model,
-            args,
-            scale,
-            n_rx,
-            n_tx,
-            n_symbols,
-            n_subcarriers,
-            pilot_positions,
-            best_nmse,
-        )
 
     checkpoint = torch.load(best_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model"])

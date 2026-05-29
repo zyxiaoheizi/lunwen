@@ -910,7 +910,7 @@ class AdaptiveMMSELinearFilterNet(nn.Module):
         h_links = h_pilot.reshape(batch, self.num_pilots, self.n_links)
         weight = self.complex_filter().to(device=h_pilot.device)
         estimate = torch.einsum("gp,bpl->bgl", weight, h_links)
-        estimate = estimate.reshape(batch, self.n_links, self.n_symbols, self.n_subcarriers)
+        estimate = estimate.permute(0, 2, 1).reshape(batch, self.n_links, self.n_symbols, self.n_subcarriers)
         return torch.cat((estimate.real, estimate.imag), dim=1).to(dtype=weight.real.dtype)
 
 

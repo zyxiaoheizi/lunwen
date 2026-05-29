@@ -15,6 +15,8 @@ DEVICE="${DEVICE:-cuda}"
 LR="${LR:-1e-3}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-6}"
 RANK="${RANK:-0}"
+INIT_LMMSE="${INIT_LMMSE:-1}"
+LMMSE_REGULARIZATION="${LMMSE_REGULARIZATION:-1e-4}"
 EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-20}"
 EARLY_STOPPING_MIN_DELTA="${EARLY_STOPPING_MIN_DELTA:-0}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
@@ -30,8 +32,13 @@ OUTDIR="${OUTDIR:-${OUT_ROOT}/ammse_filter}"
 COMMON_TESTS=("${TEST_TDLA}" "${TEST_TDLB}" "${TEST_TDLC}" "${TEST_RICIAN}")
 
 echo "Training A-MMSE-like linear filter for ${PILOT_TAG}"
-echo "epochs=${EPOCHS}, batch_size=${BATCH_SIZE}, lr=${LR}, weight_decay=${WEIGHT_DECAY}, rank=${RANK}, device=${DEVICE}"
+echo "epochs=${EPOCHS}, batch_size=${BATCH_SIZE}, lr=${LR}, weight_decay=${WEIGHT_DECAY}, rank=${RANK}, init_lmmse=${INIT_LMMSE}, device=${DEVICE}"
 echo "outdir=${OUTDIR}"
+
+EXTRA_ARGS=()
+if [[ "${INIT_LMMSE}" == "1" ]]; then
+  EXTRA_ARGS+=(--init-lmmse --lmmse-regularization "${LMMSE_REGULARIZATION}")
+fi
 
 "${PYTHON_BIN}" scripts/train_ammse_filter.py \
   --train "${TRAIN}" \
@@ -47,4 +54,5 @@ echo "outdir=${OUTDIR}"
   --early-stopping-patience "${EARLY_STOPPING_PATIENCE}" \
   --early-stopping-min-delta "${EARLY_STOPPING_MIN_DELTA}" \
   --grad-clip-norm "${GRAD_CLIP_NORM}" \
-  --outdir "${OUTDIR}"
+  --outdir "${OUTDIR}" \
+  "${EXTRA_ARGS[@]}"
