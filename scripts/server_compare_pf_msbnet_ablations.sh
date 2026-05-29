@@ -10,8 +10,9 @@ TEST_SAMPLES="${TEST_SAMPLES:-4000}"
 DEVICE="${DEVICE:-cuda}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 INCLUDE_TUNED="${INCLUDE_TUNED:-1}"
-INCLUDE_EXISTING_VARIANTS="${INCLUDE_EXISTING_VARIANTS:-1}"
+INCLUDE_EXISTING_VARIANTS="${INCLUDE_EXISTING_VARIANTS:-0}"
 INCLUDE_STRICT_ABLATIONS="${INCLUDE_STRICT_ABLATIONS:-1}"
+INCLUDE_FULL_A_STRICT="${INCLUDE_FULL_A_STRICT:-0}"
 
 TESTS=(
   "data/grid/grid_${PILOT_TAG}_tdl_a_test_${TEST_SAMPLES}.npz"
@@ -45,8 +46,10 @@ if [[ "${INCLUDE_EXISTING_VARIANTS}" == "1" ]]; then
 fi
 
 if [[ "${INCLUDE_STRICT_ABLATIONS}" == "1" ]]; then
+  if [[ "${INCLUDE_FULL_A_STRICT}" == "1" ]]; then
+    add_checkpoint "Full-A strict=${ABLATION_ROOT}/full_a/pf_msbnet_grid_best.pt"
+  fi
   for spec in \
-    "Full-A strict=${ABLATION_ROOT}/full_a/pf_msbnet_grid_best.pt" \
     "w/o pilot attention=${ABLATION_ROOT}/no_pilot_attention/pf_msbnet_grid_best.pt" \
     "w/o basis gate=${ABLATION_ROOT}/no_basis_gate/pf_msbnet_grid_best.pt" \
     "w/o learned W=${ABLATION_ROOT}/no_learned_w/pf_msbnet_grid_best.pt" \
