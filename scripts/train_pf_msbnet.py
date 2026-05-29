@@ -57,9 +57,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-channels", type=int, default=128)
     parser.add_argument("--pos-bands", type=int, default=6)
     parser.add_argument("--min-regularization", type=float, default=1e-4)
+    parser.add_argument("--use-attention", action="store_true")
+    parser.add_argument("--attention-heads", type=int, default=4)
+    parser.add_argument("--attention-layers", type=int, default=1)
+    parser.add_argument("--gate-temperature", type=float, default=1.0)
+    parser.add_argument("--disable-learned-pilot-weights", action="store_true")
+    parser.add_argument("--disable-learned-regularization", action="store_true")
+    parser.add_argument("--disable-basis-gate", action="store_true")
     parser.add_argument("--lambda-pilot", type=float, default=0.0)
     parser.add_argument("--lambda-orth", type=float, default=1e-4)
     parser.add_argument("--lambda-gate", type=float, default=1e-5)
+    parser.add_argument("--lambda-gate-entropy", type=float, default=0.0)
     parser.add_argument("--basis-init", choices=["pca", "random"], default="pca")
     parser.add_argument("--pca-max-observations", type=int, default=8192)
     parser.add_argument("--pca-seed", type=int, default=1234)
@@ -121,6 +129,12 @@ def pilot_consistency_loss(
     pred_pilot = pred_links[:, :, pilot_positions[:, 0], pilot_positions[:, 1]]
     pred_pilot = pred_pilot.permute(0, 2, 1).reshape(h_pilot.shape)
     return torch.mean(torch.abs(pred_pilot - h_pilot) ** 2)
+
+
+def gate_entropy_loss(gate: torch.Tensor) -> torch.Tensor:
+    prob = gate / gate.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    entropy = -torch.sum(prob * torch.log(prob.clamp_min(1e-8)), dim=-1)
+    return torch.mean(entropy / np.log(gate.shape[-1]))
 
 
 def pca_basis_from_training_file(
@@ -209,6 +223,13 @@ def main() -> None:
         hidden_channels=args.hidden_channels,
         pos_bands=args.pos_bands,
         min_regularization=args.min_regularization,
+        use_attention=args.use_attention,
+        attention_heads=args.attention_heads,
+        attention_layers=args.attention_layers,
+        use_learned_pilot_weights=not args.disable_learned_pilot_weights,
+        use_learned_regularization=not args.disable_learned_regularization,
+        use_basis_gate=not args.disable_basis_gate,
+        gate_temperature=args.gate_temperature,
     ).to(device)
     if args.basis_init == "pca":
         basis = pca_basis_from_training_file(
@@ -250,7 +271,17 @@ def main() -> None:
     print(f"train={args.train}, val={args.val}, scale={scale:.6g}")
     print(
         f"basis={args.num_basis}, hidden={args.hidden_channels}, basis_init={args.basis_init}, "
-        f"lambda_pilot={args.lambda_pilot}, lambda_orth={args.lambda_orth}, lambda_gate={args.lambda_gate}"
+        f"attention={args.use_attention}, heads/layers={args.attention_heads}/{args.attention_layers}"
+    )
+    print(
+        f"lambda_pilot={args.lambda_pilot}, lambda_orth={args.lambda_orth}, "
+        f"lambda_gate={args.lambda_gate}, lambda_gate_entropy={args.lambda_gate_entropy}"
+    )
+    print(
+        "ablation: "
+        f"learned_W={not args.disable_learned_pilot_weights}, "
+        f"learned_lambda={not args.disable_learned_regularization}, "
+        f"basis_gate={not args.disable_basis_gate}, gate_temperature={args.gate_temperature}"
     )
 
     rows: list[dict[str, float | int | str]] = []
@@ -262,6 +293,7 @@ def main() -> None:
         train_loss = 0.0
         train_count = 0
         train_gate = 0.0
+        train_gate_entropy = 0.0
         for h_pilot, target in train_loader:
             h_pilot = h_pilot.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
@@ -279,11 +311,16 @@ def main() -> None:
                 )
             if args.lambda_orth > 0:
                 loss = loss + args.lambda_orth * model.basis_orthogonality_loss()
-            if args.lambda_gate > 0:
+            if args.lambda_gate > 0 or args.lambda_gate_entropy > 0:
                 _, gate, _ = model.encode_pilots(h_pilot)
-                gate_loss = torch.mean(gate)
-                loss = loss + args.lambda_gate * gate_loss
-                train_gate += float(gate_loss.item()) * target.shape[0]
+                if args.lambda_gate > 0:
+                    gate_loss = torch.mean(gate)
+                    loss = loss + args.lambda_gate * gate_loss
+                    train_gate += float(gate_loss.item()) * target.shape[0]
+                if args.lambda_gate_entropy > 0:
+                    entropy_loss = gate_entropy_loss(gate)
+                    loss = loss + args.lambda_gate_entropy * entropy_loss
+                    train_gate_entropy += float(entropy_loss.item()) * target.shape[0]
 
             loss.backward()
             optimizer.step()
@@ -298,6 +335,9 @@ def main() -> None:
             "lr": optimizer.param_groups[0]["lr"],
             "train_loss": train_loss / max(train_count, 1),
             "train_gate_mean": train_gate / max(train_count, 1) if args.lambda_gate > 0 else 0.0,
+            "train_gate_entropy": (
+                train_gate_entropy / max(train_count, 1) if args.lambda_gate_entropy > 0 else 0.0
+            ),
             "val_loss": val_metrics["loss"],
             "val_nmse": val_metrics["nmse"],
             "val_nmse_db": val_metrics["nmse_db"],
@@ -328,6 +368,13 @@ def main() -> None:
                     "hidden_channels": args.hidden_channels,
                     "pos_bands": args.pos_bands,
                     "min_regularization": args.min_regularization,
+                    "use_attention": args.use_attention,
+                    "attention_heads": args.attention_heads,
+                    "attention_layers": args.attention_layers,
+                    "use_learned_pilot_weights": not args.disable_learned_pilot_weights,
+                    "use_learned_regularization": not args.disable_learned_regularization,
+                    "use_basis_gate": not args.disable_basis_gate,
+                    "gate_temperature": args.gate_temperature,
                     "best_val_nmse": best_nmse,
                     "param_count": count_parameters(model),
                 },
@@ -373,6 +420,13 @@ def main() -> None:
         "best_val_nmse_db": nmse_db_from_linear(best_nmse),
         "best_epoch": best_epoch,
         "basis_init": args.basis_init,
+        "use_attention": args.use_attention,
+        "attention_heads": args.attention_heads,
+        "attention_layers": args.attention_layers,
+        "use_learned_pilot_weights": not args.disable_learned_pilot_weights,
+        "use_learned_regularization": not args.disable_learned_regularization,
+        "use_basis_gate": not args.disable_basis_gate,
+        "gate_temperature": args.gate_temperature,
         "best_checkpoint": str(best_path),
         "last_checkpoint": str(last_path),
         "metrics_csv": str(metrics_path),

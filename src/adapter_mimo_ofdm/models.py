@@ -233,6 +233,95 @@ class PilotLockedErrorRefinementNet(nn.Module):
         return base_estimate + residual
 
 
+class RelativePilotAttentionLayer(nn.Module):
+    """Self-attention over pilot tokens with learned relative time-frequency bias."""
+
+    def __init__(self, hidden_channels: int, num_heads: int, relative_feature_dim: int) -> None:
+        super().__init__()
+        if hidden_channels % num_heads != 0:
+            raise ValueError("hidden_channels must be divisible by num_heads.")
+        self.hidden_channels = int(hidden_channels)
+        self.num_heads = int(num_heads)
+        self.head_dim = self.hidden_channels // self.num_heads
+        self.scale = self.head_dim**-0.5
+
+        self.norm1 = nn.LayerNorm(hidden_channels)
+        self.qkv = nn.Linear(hidden_channels, 3 * hidden_channels)
+        self.relative_bias = nn.Sequential(
+            nn.Linear(relative_feature_dim, hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, num_heads),
+        )
+        self.out = nn.Linear(hidden_channels, hidden_channels)
+        self.norm2 = nn.LayerNorm(hidden_channels)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_channels, 2 * hidden_channels),
+            nn.GELU(),
+            nn.Linear(2 * hidden_channels, hidden_channels),
+        )
+
+    def forward(self, tokens: torch.Tensor, relative_features: torch.Tensor) -> torch.Tensor:
+        batch, num_pilots, _ = tokens.shape
+        normalized = self.norm1(tokens)
+        qkv = self.qkv(normalized)
+        qkv = qkv.view(batch, num_pilots, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        rel_bias = self.relative_bias(relative_features).permute(2, 0, 1).unsqueeze(0)
+        scores = scores + rel_bias.to(device=tokens.device, dtype=tokens.dtype)
+        attn = torch.softmax(scores, dim=-1)
+        context = torch.matmul(attn, v)
+        context = context.transpose(1, 2).reshape(batch, num_pilots, self.hidden_channels)
+        tokens = tokens + self.out(context)
+        return tokens + self.ffn(self.norm2(tokens))
+
+
+class BasisPilotCrossAttention(nn.Module):
+    """Let learned basis queries read the current pilot set before gating bases."""
+
+    def __init__(self, hidden_channels: int, num_heads: int, num_basis: int) -> None:
+        super().__init__()
+        if hidden_channels % num_heads != 0:
+            raise ValueError("hidden_channels must be divisible by num_heads.")
+        self.hidden_channels = int(hidden_channels)
+        self.num_heads = int(num_heads)
+        self.num_basis = int(num_basis)
+        self.head_dim = self.hidden_channels // self.num_heads
+        self.scale = self.head_dim**-0.5
+
+        self.basis_queries = nn.Parameter(torch.empty(num_basis, hidden_channels))
+        self.token_norm = nn.LayerNorm(hidden_channels)
+        self.query_proj = nn.Linear(hidden_channels, hidden_channels)
+        self.key_proj = nn.Linear(hidden_channels, hidden_channels)
+        self.value_proj = nn.Linear(hidden_channels, hidden_channels)
+        self.out = nn.Linear(hidden_channels, hidden_channels)
+        self.gate_head = nn.Linear(hidden_channels, 1)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.basis_queries, mean=0.0, std=self.hidden_channels**-0.5)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        batch, num_pilots, _ = tokens.shape
+        tokens = self.token_norm(tokens)
+        q = self.query_proj(self.basis_queries)
+        q = q.view(self.num_basis, self.num_heads, self.head_dim).permute(1, 0, 2)
+        q = q.unsqueeze(0).expand(batch, -1, -1, -1)
+
+        k = self.key_proj(tokens).view(batch, num_pilots, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.value_proj(tokens).view(batch, num_pilots, self.num_heads, self.head_dim).transpose(1, 2)
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn = torch.softmax(scores, dim=-1)
+        context = torch.matmul(attn, v)
+        context = context.transpose(1, 2).reshape(batch, self.num_basis, self.hidden_channels)
+        context = self.out(context)
+        return self.gate_head(context).squeeze(-1)
+
+
 class PilotFittedMIMOSharedBasisNet(nn.Module):
     """Pilot-fitted MIMO shared-basis estimator.
 
@@ -260,6 +349,13 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         pos_bands: int = 6,
         min_gate: float = 0.05,
         min_regularization: float = 1e-4,
+        use_attention: bool = False,
+        attention_heads: int = 4,
+        attention_layers: int = 1,
+        use_learned_pilot_weights: bool = True,
+        use_learned_regularization: bool = True,
+        use_basis_gate: bool = True,
+        gate_temperature: float = 1.0,
     ) -> None:
         super().__init__()
         if pilot_positions.ndim != 2 or pilot_positions.shape[1] != 2:
@@ -275,12 +371,20 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         self.pos_bands = int(pos_bands)
         self.min_gate = float(min_gate)
         self.min_regularization = float(min_regularization)
+        self.use_attention = bool(use_attention)
+        self.attention_heads = int(attention_heads)
+        self.num_attention_layers = int(attention_layers)
+        self.use_learned_pilot_weights = bool(use_learned_pilot_weights)
+        self.use_learned_regularization = bool(use_learned_regularization)
+        self.use_basis_gate = bool(use_basis_gate)
+        self.gate_temperature = max(float(gate_temperature), 1e-3)
 
         positions = pilot_positions.to(dtype=torch.long)
         self.register_buffer("pilot_positions", positions)
         pilot_flat = positions[:, 0] * self.n_subcarriers + positions[:, 1]
         self.register_buffer("pilot_flat_indices", pilot_flat.to(dtype=torch.long))
         self.register_buffer("pilot_position_features", self._position_features(positions))
+        self.register_buffer("relative_position_features", self._relative_position_features(positions), persistent=False)
 
         pos_dim = int(self.pilot_position_features.shape[1])
         token_dim = 2 * self.n_links + pos_dim
@@ -291,6 +395,15 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.weight_head = nn.Linear(hidden_channels, 1)
+        if self.use_attention:
+            relative_dim = int(self.relative_position_features.shape[-1])
+            self.attention_encoder = nn.ModuleList(
+                [
+                    RelativePilotAttentionLayer(hidden_channels, self.attention_heads, relative_dim)
+                    for _ in range(self.num_attention_layers)
+                ]
+            )
+            self.basis_attention = BasisPilotCrossAttention(hidden_channels, self.attention_heads, num_basis)
         self.summary_mlp = nn.Sequential(
             nn.Linear(hidden_channels, hidden_channels),
             nn.ReLU(inplace=True),
@@ -333,6 +446,32 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
             )
         return torch.stack(features, dim=1)
 
+    def _relative_position_features(self, positions: torch.Tensor) -> torch.Tensor:
+        pos = positions.to(dtype=torch.float32)
+        if self.n_symbols > 1:
+            t = pos[:, 0] / float(self.n_symbols - 1)
+        else:
+            t = pos[:, 0]
+        if self.n_subcarriers > 1:
+            f = pos[:, 1] / float(self.n_subcarriers - 1)
+        else:
+            f = pos[:, 1]
+
+        dt = t[:, None] - t[None, :]
+        df = f[:, None] - f[None, :]
+        features = [dt, df, torch.abs(dt), torch.abs(df)]
+        for band in range(self.pos_bands):
+            freq = float(2 ** band)
+            features.extend(
+                [
+                    torch.sin(2.0 * torch.pi * freq * dt),
+                    torch.cos(2.0 * torch.pi * freq * dt),
+                    torch.sin(2.0 * torch.pi * freq * df),
+                    torch.cos(2.0 * torch.pi * freq * df),
+                ]
+            )
+        return torch.stack(features, dim=-1)
+
     @torch.no_grad()
     def set_complex_basis(self, basis: torch.Tensor) -> None:
         """Initialize learned basis from a complex tensor [basis, symbol, subcarrier]."""
@@ -359,14 +498,37 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         pos_features = self.pilot_position_features.to(device=h_pilot.device, dtype=self.basis.dtype)
         pos_features = pos_features.unsqueeze(0).expand(batch, -1, -1)
         tokens = self.token_mlp(torch.cat((value_features, pos_features), dim=-1))
+        if self.use_attention:
+            relative_features = self.relative_position_features.to(device=h_pilot.device, dtype=self.basis.dtype)
+            for layer in self.attention_encoder:
+                tokens = layer(tokens, relative_features)
 
-        pilot_weights = F.softplus(self.weight_head(tokens)).squeeze(-1) + 1e-4
+        if self.use_learned_pilot_weights:
+            pilot_weights = F.softplus(self.weight_head(tokens)).squeeze(-1) + 1e-4
+        else:
+            pilot_weights = torch.ones(batch, num_pilots, device=h_pilot.device, dtype=self.basis.dtype)
         alpha = pilot_weights / pilot_weights.sum(dim=1, keepdim=True).clamp_min(1e-8)
         summary = torch.sum(tokens * alpha.unsqueeze(-1), dim=1)
         summary = self.summary_mlp(summary)
 
-        gate = self.min_gate + (1.0 - self.min_gate) * torch.sigmoid(self.gate_head(summary))
-        regularization = self.min_regularization + F.softplus(self.regularization_head(summary)).squeeze(-1)
+        if self.use_basis_gate:
+            if self.use_attention:
+                gate_logits = self.basis_attention(tokens)
+            else:
+                gate_logits = self.gate_head(summary)
+            gate = self.min_gate + (1.0 - self.min_gate) * torch.sigmoid(gate_logits / self.gate_temperature)
+        else:
+            gate = torch.ones(batch, self.num_basis, device=h_pilot.device, dtype=self.basis.dtype)
+
+        if self.use_learned_regularization:
+            regularization = self.min_regularization + F.softplus(self.regularization_head(summary)).squeeze(-1)
+        else:
+            regularization = torch.full(
+                (batch,),
+                self.min_regularization,
+                device=h_pilot.device,
+                dtype=self.basis.dtype,
+            )
         return pilot_weights, gate, regularization
 
     def forward(self, h_pilot: torch.Tensor) -> torch.Tensor:

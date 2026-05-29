@@ -295,6 +295,13 @@ def load_model_from_checkpoint(path: Path, device: torch.device) -> tuple[str, t
             hidden_channels=int(checkpoint.get("hidden_channels", 128)),
             pos_bands=int(checkpoint.get("pos_bands", 6)),
             min_regularization=float(checkpoint.get("min_regularization", 1e-4)),
+            use_attention=bool(checkpoint.get("use_attention", False)),
+            attention_heads=int(checkpoint.get("attention_heads", 4)),
+            attention_layers=int(checkpoint.get("attention_layers", 1)),
+            use_learned_pilot_weights=bool(checkpoint.get("use_learned_pilot_weights", True)),
+            use_learned_regularization=bool(checkpoint.get("use_learned_regularization", True)),
+            use_basis_gate=bool(checkpoint.get("use_basis_gate", True)),
+            gate_temperature=float(checkpoint.get("gate_temperature", 1.0)),
         ).to(device)
         model.load_state_dict(checkpoint["model"])
         scale = float(checkpoint.get("scale", 1.0))
