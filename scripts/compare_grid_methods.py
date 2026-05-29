@@ -198,6 +198,150 @@ def mismatched_lmmse_grid_estimate(
     )
 
 
+def delay_bem_basis(
+    n_symbols: int,
+    n_subcarriers: int,
+    delays_sec: np.ndarray,
+    subcarrier_spacing_hz: float,
+    time_order: int,
+) -> np.ndarray:
+    """Build a delay-domain CE-BEM dictionary on the time-frequency grid.
+
+    Each atom is psi_q[t] * exp(-j 2*pi*k*df*tau_l). With time_order=0 this is
+    the common low-mobility delay-domain channel model; larger values add
+    complex-exponential time variation as in CE-BEM/GCE-BEM style baselines.
+    """
+
+    sym_ids = np.arange(n_symbols, dtype=np.float64)
+    sub_ids = np.arange(n_subcarriers, dtype=np.float64)
+    time_indices = np.arange(-int(time_order), int(time_order) + 1)
+    atoms = []
+    for q in time_indices:
+        time_atom = np.exp(1j * 2.0 * np.pi * q * sym_ids / max(n_symbols, 1))
+        for tau in delays_sec.astype(np.float64):
+            freq_atom = np.exp(-1j * 2.0 * np.pi * sub_ids * subcarrier_spacing_hz * tau)
+            atoms.append((time_atom[:, None] * freq_atom[None, :]).reshape(-1))
+    return np.stack(atoms, axis=1).astype(np.complex128)
+
+
+def delay_bem_grid_estimate(
+    data: np.lib.npyio.NpzFile,
+    regularization: float,
+    time_order: int,
+    oracle_delays: bool,
+    n_taps: int | None = None,
+) -> np.ndarray:
+    """Delay-domain BEM ridge channel estimator.
+
+    This is closer to classical BEM papers than a PCA image basis: the basis is
+    generated from delay-domain complex exponentials, and only the BEM
+    coefficients are fitted from pilots.
+    """
+
+    h_pilot_ls = data["h_pilot_ls"].astype(np.complex128)
+    positions = data["pilot_positions"].astype(np.int64)
+    n_symbols = int(data["n_symbols"])
+    n_subcarriers = int(data["n_subcarriers"])
+    subcarrier_spacing_hz = float(data["subcarrier_spacing_hz"])
+    if oracle_delays:
+        delays_sec = data["delays_sec"].astype(np.float64)
+    else:
+        taps = int(data["n_taps"]) if n_taps is None else int(n_taps)
+        sample_period = 1.0 / (n_subcarriers * subcarrier_spacing_hz)
+        delays_sec = np.arange(taps, dtype=np.float64) * sample_period
+
+    basis = delay_bem_basis(
+        n_symbols=n_symbols,
+        n_subcarriers=n_subcarriers,
+        delays_sec=delays_sec,
+        subcarrier_spacing_hz=subcarrier_spacing_hz,
+        time_order=time_order,
+    )
+    grid_size, num_atoms = basis.shape
+    pilot_flat = positions[:, 0] * n_subcarriers + positions[:, 1]
+    basis_pilot = basis[pilot_flat]
+    gram = basis_pilot.conj().T @ basis_pilot
+    eye = np.eye(num_atoms, dtype=np.complex128)
+    estimates = np.empty((h_pilot_ls.shape[0], grid_size, h_pilot_ls.shape[2], h_pilot_ls.shape[3]), dtype=np.complex64)
+    system = gram + float(regularization) * eye
+    for idx in range(h_pilot_ls.shape[0]):
+        rhs = basis_pilot.conj().T @ h_pilot_ls[idx].reshape(len(pilot_flat), -1)
+        coeff = np.linalg.solve(system, rhs)
+        estimates[idx] = (basis @ coeff).reshape(grid_size, h_pilot_ls.shape[2], h_pilot_ls.shape[3])
+    return estimates.reshape(h_pilot_ls.shape[0], n_symbols, n_subcarriers, h_pilot_ls.shape[2], h_pilot_ls.shape[3])
+
+
+def sparse_delay_bem_omp_estimate(
+    data: np.lib.npyio.NpzFile,
+    regularization: float,
+    time_order: int,
+    sparsity: int,
+    oracle_delays: bool,
+    n_taps: int | None = None,
+) -> np.ndarray:
+    """Sparse delay-BEM estimator with OMP path selection.
+
+    This follows the practical sparse-BEM idea used in many high-mobility or
+    sparse multipath channel-estimation papers: the delay dictionary may be
+    larger than the number of pilots, but only a few atoms are selected per
+    frame/link before ridge coefficient fitting.
+    """
+
+    h_pilot_ls = data["h_pilot_ls"].astype(np.complex128)
+    positions = data["pilot_positions"].astype(np.int64)
+    n_symbols = int(data["n_symbols"])
+    n_subcarriers = int(data["n_subcarriers"])
+    subcarrier_spacing_hz = float(data["subcarrier_spacing_hz"])
+    if oracle_delays:
+        delays_sec = data["delays_sec"].astype(np.float64)
+    else:
+        taps = int(data["n_taps"]) if n_taps is None else int(n_taps)
+        sample_period = 1.0 / (n_subcarriers * subcarrier_spacing_hz)
+        delays_sec = np.arange(taps, dtype=np.float64) * sample_period
+
+    basis = delay_bem_basis(
+        n_symbols=n_symbols,
+        n_subcarriers=n_subcarriers,
+        delays_sec=delays_sec,
+        subcarrier_spacing_hz=subcarrier_spacing_hz,
+        time_order=time_order,
+    )
+    grid_size, num_atoms = basis.shape
+    pilot_flat = positions[:, 0] * n_subcarriers + positions[:, 1]
+    dictionary = basis[pilot_flat]
+    atom_norms = np.linalg.norm(dictionary, axis=0).clip(min=1e-12)
+    normalized_dictionary = dictionary / atom_norms[None, :]
+    max_sparsity = max(1, min(int(sparsity), len(pilot_flat), num_atoms))
+    estimates = np.zeros(
+        (h_pilot_ls.shape[0], grid_size, h_pilot_ls.shape[2], h_pilot_ls.shape[3]),
+        dtype=np.complex64,
+    )
+    for frame in range(h_pilot_ls.shape[0]):
+        pilot_links = h_pilot_ls[frame].reshape(len(pilot_flat), -1)
+        for link in range(pilot_links.shape[1]):
+            y_obs = pilot_links[:, link]
+            residual = y_obs.copy()
+            selected: list[int] = []
+            coeff = np.zeros(0, dtype=np.complex128)
+            for _ in range(max_sparsity):
+                correlations = normalized_dictionary.conj().T @ residual
+                if selected:
+                    correlations[np.asarray(selected, dtype=np.int64)] = 0.0
+                atom = int(np.argmax(np.abs(correlations)))
+                if atom in selected or np.abs(correlations[atom]) < 1e-12:
+                    break
+                selected.append(atom)
+                sub_dictionary = dictionary[:, selected]
+                gram = sub_dictionary.conj().T @ sub_dictionary
+                gram = gram + float(regularization) * np.eye(len(selected), dtype=np.complex128)
+                rhs = sub_dictionary.conj().T @ y_obs
+                coeff = np.linalg.solve(gram, rhs)
+                residual = y_obs - sub_dictionary @ coeff
+            if selected:
+                estimates[frame, :, link // h_pilot_ls.shape[3], link % h_pilot_ls.shape[3]] = basis[:, selected] @ coeff
+    return estimates.reshape(h_pilot_ls.shape[0], n_symbols, n_subcarriers, h_pilot_ls.shape[2], h_pilot_ls.shape[3])
+
+
 def estimate_empirical_grid_statistics(
     train_path: Path,
     key: str = "h_true_grid",
@@ -453,6 +597,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lmmse-profile", default="tdl-a")
     parser.add_argument("--lmmse-delay-spread-ns", type=float, default=300.0)
     parser.add_argument("--lmmse-max-doppler-hz", type=float, default=None)
+    parser.add_argument("--include-delay-bem", action="store_true")
+    parser.add_argument("--include-oracle-delay-bem", action="store_true")
+    parser.add_argument("--delay-bem-regularization", type=float, default=1e-2)
+    parser.add_argument("--delay-bem-time-order", type=int, default=0)
+    parser.add_argument("--delay-bem-taps", type=int, default=None)
+    parser.add_argument("--include-sparse-delay-bem", action="store_true")
+    parser.add_argument("--include-oracle-sparse-delay-bem", action="store_true")
+    parser.add_argument("--sparse-delay-bem-atoms", type=int, default=4)
     return parser.parse_args()
 
 
@@ -585,6 +737,105 @@ def main() -> None:
                 }
             )
             print(f"{dataset_name} | Mismatched 2D LMMSE ({args.lmmse_profile}): {mismatch_nmse_db:.3f} dB")
+
+        if args.include_delay_bem:
+            h_delay_bem = delay_bem_grid_estimate(
+                data,
+                regularization=args.delay_bem_regularization,
+                time_order=args.delay_bem_time_order,
+                oracle_delays=False,
+                n_taps=args.delay_bem_taps,
+            )
+            delay_bem_ri = complex_grid_to_ri(h_delay_bem)
+            delay_bem_nmse, delay_bem_nmse_db = np_nmse(delay_bem_ri, y)
+            rows.append(
+                {
+                    "dataset": dataset_name,
+                    "method": f"Delay-BEM Ridge (Q={args.delay_bem_time_order})",
+                    "nmse": delay_bem_nmse,
+                    "nmse_db": delay_bem_nmse_db,
+                    "params": 0,
+                    "checkpoint": "",
+                }
+            )
+            print(f"{dataset_name} | Delay-BEM Ridge (Q={args.delay_bem_time_order}): {delay_bem_nmse_db:.3f} dB")
+
+        if args.include_oracle_delay_bem:
+            h_oracle_delay_bem = delay_bem_grid_estimate(
+                data,
+                regularization=args.delay_bem_regularization,
+                time_order=args.delay_bem_time_order,
+                oracle_delays=True,
+                n_taps=args.delay_bem_taps,
+            )
+            oracle_delay_bem_ri = complex_grid_to_ri(h_oracle_delay_bem)
+            oracle_delay_bem_nmse, oracle_delay_bem_nmse_db = np_nmse(oracle_delay_bem_ri, y)
+            rows.append(
+                {
+                    "dataset": dataset_name,
+                    "method": f"Oracle Delay-BEM Ridge (Q={args.delay_bem_time_order})",
+                    "nmse": oracle_delay_bem_nmse,
+                    "nmse_db": oracle_delay_bem_nmse_db,
+                    "params": 0,
+                    "checkpoint": "",
+                }
+            )
+            print(
+                f"{dataset_name} | Oracle Delay-BEM Ridge (Q={args.delay_bem_time_order}): "
+                f"{oracle_delay_bem_nmse_db:.3f} dB"
+            )
+
+        if args.include_sparse_delay_bem:
+            h_sparse_delay_bem = sparse_delay_bem_omp_estimate(
+                data,
+                regularization=args.delay_bem_regularization,
+                time_order=args.delay_bem_time_order,
+                sparsity=args.sparse_delay_bem_atoms,
+                oracle_delays=False,
+                n_taps=args.delay_bem_taps,
+            )
+            sparse_delay_bem_ri = complex_grid_to_ri(h_sparse_delay_bem)
+            sparse_delay_bem_nmse, sparse_delay_bem_nmse_db = np_nmse(sparse_delay_bem_ri, y)
+            rows.append(
+                {
+                    "dataset": dataset_name,
+                    "method": f"Sparse Delay-BEM OMP (K={args.sparse_delay_bem_atoms})",
+                    "nmse": sparse_delay_bem_nmse,
+                    "nmse_db": sparse_delay_bem_nmse_db,
+                    "params": 0,
+                    "checkpoint": "",
+                }
+            )
+            print(
+                f"{dataset_name} | Sparse Delay-BEM OMP (K={args.sparse_delay_bem_atoms}): "
+                f"{sparse_delay_bem_nmse_db:.3f} dB"
+            )
+
+        if args.include_oracle_sparse_delay_bem:
+            h_oracle_sparse_delay_bem = sparse_delay_bem_omp_estimate(
+                data,
+                regularization=args.delay_bem_regularization,
+                time_order=args.delay_bem_time_order,
+                sparsity=args.sparse_delay_bem_atoms,
+                oracle_delays=True,
+                n_taps=args.delay_bem_taps,
+            )
+            oracle_sparse_delay_bem_ri = complex_grid_to_ri(h_oracle_sparse_delay_bem)
+            oracle_sparse_delay_bem_nmse, oracle_sparse_delay_bem_nmse_db = np_nmse(oracle_sparse_delay_bem_ri, y)
+            rows.append(
+                {
+                    "dataset": dataset_name,
+                    "method": f"Oracle Sparse Delay-BEM OMP (K={args.sparse_delay_bem_atoms})",
+                    "nmse": oracle_sparse_delay_bem_nmse,
+                    "nmse_db": oracle_sparse_delay_bem_nmse_db,
+                    "params": 0,
+                    "checkpoint": "",
+                }
+            )
+            print(
+                f"{dataset_name} | Oracle Sparse Delay-BEM OMP (K={args.sparse_delay_bem_atoms}): "
+                f"{oracle_sparse_delay_bem_nmse_db:.3f} dB"
+            )
 
         for display_name, model_name, model, scale, params, checkpoint_path in loaded_models:
             if model_name in {"pf_msbnet", "ammse_filter", "fixed_basis_ridge"}:

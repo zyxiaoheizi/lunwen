@@ -15,6 +15,14 @@ LMMSE_PROFILE="${LMMSE_PROFILE:-tdl-a}"
 LMMSE_DELAY_SPREAD_NS="${LMMSE_DELAY_SPREAD_NS:-300}"
 INCLUDE_PAPER_LMMSE="${INCLUDE_PAPER_LMMSE:-1}"
 INCLUDE_EMPIRICAL_LMMSE="${INCLUDE_EMPIRICAL_LMMSE:-1}"
+INCLUDE_DELAY_BEM="${INCLUDE_DELAY_BEM:-1}"
+INCLUDE_ORACLE_DELAY_BEM="${INCLUDE_ORACLE_DELAY_BEM:-0}"
+INCLUDE_SPARSE_DELAY_BEM="${INCLUDE_SPARSE_DELAY_BEM:-1}"
+INCLUDE_ORACLE_SPARSE_DELAY_BEM="${INCLUDE_ORACLE_SPARSE_DELAY_BEM:-0}"
+DELAY_BEM_REGULARIZATION="${DELAY_BEM_REGULARIZATION:-1e-2}"
+DELAY_BEM_TIME_ORDER="${DELAY_BEM_TIME_ORDER:-0}"
+DELAY_BEM_TAPS="${DELAY_BEM_TAPS:-}"
+SPARSE_DELAY_BEM_ATOMS="${SPARSE_DELAY_BEM_ATOMS:-4}"
 
 TESTS=()
 for snr in ${SNR_LIST}; do
@@ -66,6 +74,42 @@ if [[ -f "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz" ]]; then
       --empirical-lmmse-train "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz"
     )
   fi
+fi
+if [[ "${INCLUDE_DELAY_BEM}" == "1" ]]; then
+  LMMSE_ARGS+=(
+    --include-delay-bem
+    --delay-bem-regularization "${DELAY_BEM_REGULARIZATION}"
+    --delay-bem-time-order "${DELAY_BEM_TIME_ORDER}"
+  )
+  if [[ -n "${DELAY_BEM_TAPS}" ]]; then
+    LMMSE_ARGS+=(--delay-bem-taps "${DELAY_BEM_TAPS}")
+  fi
+fi
+if [[ "${INCLUDE_ORACLE_DELAY_BEM}" == "1" ]]; then
+  LMMSE_ARGS+=(
+    --include-oracle-delay-bem
+    --delay-bem-regularization "${DELAY_BEM_REGULARIZATION}"
+    --delay-bem-time-order "${DELAY_BEM_TIME_ORDER}"
+  )
+fi
+if [[ "${INCLUDE_SPARSE_DELAY_BEM}" == "1" ]]; then
+  LMMSE_ARGS+=(
+    --include-sparse-delay-bem
+    --sparse-delay-bem-atoms "${SPARSE_DELAY_BEM_ATOMS}"
+    --delay-bem-regularization "${DELAY_BEM_REGULARIZATION}"
+    --delay-bem-time-order "${DELAY_BEM_TIME_ORDER}"
+  )
+  if [[ -n "${DELAY_BEM_TAPS}" ]]; then
+    LMMSE_ARGS+=(--delay-bem-taps "${DELAY_BEM_TAPS}")
+  fi
+fi
+if [[ "${INCLUDE_ORACLE_SPARSE_DELAY_BEM}" == "1" ]]; then
+  LMMSE_ARGS+=(
+    --include-oracle-sparse-delay-bem
+    --sparse-delay-bem-atoms "${SPARSE_DELAY_BEM_ATOMS}"
+    --delay-bem-regularization "${DELAY_BEM_REGULARIZATION}"
+    --delay-bem-time-order "${DELAY_BEM_TIME_ORDER}"
+  )
 fi
 
 OUTDIR="${OUTDIR:-${OUT_ROOT}/snr_curve}"
