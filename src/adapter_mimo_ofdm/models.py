@@ -838,6 +838,148 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         return -torch.stack(entropies).mean()
 
 
+class AdaptiveMMSELinearFilterNet(nn.Module):
+    """A-MMSE-like learned linear filter baseline.
+
+    This model follows the closest-prior idea of learning a linear MMSE-style
+    filter from data. It does not use an LS-interpolated image and it does not
+    run a nonlinear decoder at inference time. Given raw pilot LS observations
+    h_p, it applies a learned complex linear filter W:
+
+        h_hat = W h_p
+
+    The same time-frequency filter is shared across MIMO links, matching the
+    current i.i.d. link simulation setting and keeping the baseline lightweight.
+    """
+
+    def __init__(
+        self,
+        pilot_positions: torch.Tensor,
+        n_symbols: int = 14,
+        n_subcarriers: int = 72,
+        n_rx: int = 2,
+        n_tx: int = 2,
+        rank: int = 0,
+    ) -> None:
+        super().__init__()
+        if pilot_positions.ndim != 2 or pilot_positions.shape[1] != 2:
+            raise ValueError("pilot_positions must have shape [pilot, 2].")
+        self.n_symbols = int(n_symbols)
+        self.n_subcarriers = int(n_subcarriers)
+        self.n_rx = int(n_rx)
+        self.n_tx = int(n_tx)
+        self.n_links = self.n_rx * self.n_tx
+        self.rank = int(rank)
+        self.grid_size = self.n_symbols * self.n_subcarriers
+
+        positions = pilot_positions.to(dtype=torch.long)
+        self.register_buffer("pilot_positions", positions)
+        self.num_pilots = int(positions.shape[0])
+
+        if self.rank > 0:
+            self.left = nn.Parameter(torch.empty(2, self.grid_size, self.rank))
+            self.right = nn.Parameter(torch.empty(2, self.num_pilots, self.rank))
+        else:
+            self.filter = nn.Parameter(torch.empty(2, self.grid_size, self.num_pilots))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        if self.rank > 0:
+            std = 1.0 / max(self.rank, 1) ** 0.5
+            nn.init.normal_(self.left, mean=0.0, std=std / max(self.grid_size, 1) ** 0.25)
+            nn.init.normal_(self.right, mean=0.0, std=std / max(self.num_pilots, 1) ** 0.25)
+        else:
+            nn.init.normal_(self.filter, mean=0.0, std=1.0 / max(self.num_pilots, 1) ** 0.5)
+
+    def complex_filter(self) -> torch.Tensor:
+        if self.rank > 0:
+            left = torch.complex(self.left[0], self.left[1])
+            right = torch.complex(self.right[0], self.right[1])
+            return left @ right.conj().transpose(0, 1)
+        return torch.complex(self.filter[0], self.filter[1])
+
+    def forward(self, h_pilot: torch.Tensor) -> torch.Tensor:
+        if not torch.is_complex(h_pilot):
+            raise ValueError("AdaptiveMMSELinearFilterNet expects complex h_pilot input.")
+        if h_pilot.shape[1] != self.num_pilots:
+            raise ValueError("h_pilot pilot dimension does not match model metadata.")
+        if h_pilot.shape[2] != self.n_rx or h_pilot.shape[3] != self.n_tx:
+            raise ValueError("h_pilot rx/tx dimensions do not match model metadata.")
+
+        batch = h_pilot.shape[0]
+        h_links = h_pilot.reshape(batch, self.num_pilots, self.n_links)
+        weight = self.complex_filter().to(device=h_pilot.device)
+        estimate = torch.einsum("gp,bpl->bgl", weight, h_links)
+        estimate = estimate.reshape(batch, self.n_links, self.n_symbols, self.n_subcarriers)
+        return torch.cat((estimate.real, estimate.imag), dim=1).to(dtype=weight.real.dtype)
+
+
+class FixedSharedBasisRidgeNet(nn.Module):
+    """Fixed BEM/PCA shared-basis ridge baseline.
+
+    This is a non-neural closest-prior baseline for basis-expansion channel
+    estimation. A fixed set of basis maps B is learned offline from data by PCA
+    or chosen analytically, then each frame estimates only the coefficients from
+    pilots:
+
+        a = (B_p^H B_p + lambda I)^(-1) B_p^H h_p
+        h_hat = B a
+
+    Unlike PF-MSBNet, there is no learned pilot weighting, no basis gate, and no
+    trainable per-frame controller.
+    """
+
+    def __init__(
+        self,
+        pilot_positions: torch.Tensor,
+        basis: torch.Tensor,
+        n_rx: int = 2,
+        n_tx: int = 2,
+        regularization: float = 1e-3,
+    ) -> None:
+        super().__init__()
+        if pilot_positions.ndim != 2 or pilot_positions.shape[1] != 2:
+            raise ValueError("pilot_positions must have shape [pilot, 2].")
+        if basis.ndim != 3 or not torch.is_complex(basis):
+            raise ValueError("basis must be complex with shape [basis, symbol, subcarrier].")
+        self.n_rx = int(n_rx)
+        self.n_tx = int(n_tx)
+        self.n_links = self.n_rx * self.n_tx
+        self.num_basis = int(basis.shape[0])
+        self.n_symbols = int(basis.shape[1])
+        self.n_subcarriers = int(basis.shape[2])
+        self.regularization = float(regularization)
+
+        positions = pilot_positions.to(dtype=torch.long)
+        self.register_buffer("pilot_positions", positions)
+        pilot_flat = positions[:, 0] * self.n_subcarriers + positions[:, 1]
+        self.register_buffer("pilot_flat_indices", pilot_flat.to(dtype=torch.long))
+        self.register_buffer("basis_real", basis.real.to(dtype=torch.float32))
+        self.register_buffer("basis_imag", basis.imag.to(dtype=torch.float32))
+
+    def complex_basis(self) -> torch.Tensor:
+        return torch.complex(self.basis_real, self.basis_imag)
+
+    def forward(self, h_pilot: torch.Tensor) -> torch.Tensor:
+        if not torch.is_complex(h_pilot):
+            raise ValueError("FixedSharedBasisRidgeNet expects complex h_pilot input.")
+        if h_pilot.shape[2] != self.n_rx or h_pilot.shape[3] != self.n_tx:
+            raise ValueError("h_pilot rx/tx dimensions do not match model metadata.")
+
+        batch = h_pilot.shape[0]
+        basis = self.complex_basis().to(device=h_pilot.device)
+        basis_flat = basis.reshape(self.num_basis, self.n_symbols * self.n_subcarriers)
+        basis_pilot = basis_flat[:, self.pilot_flat_indices.to(device=h_pilot.device)].transpose(0, 1)
+        gram = basis_pilot.conj().transpose(0, 1) @ basis_pilot
+        eye = torch.eye(self.num_basis, device=h_pilot.device, dtype=basis.dtype)
+        gram = gram + self.regularization * eye
+        rhs = basis_pilot.conj().transpose(0, 1) @ h_pilot.reshape(batch, h_pilot.shape[1], self.n_links)
+        coeff = torch.linalg.solve(gram.unsqueeze(0).expand(batch, -1, -1), rhs)
+        estimate = torch.einsum("bml,mg->blg", coeff, basis_flat)
+        estimate = estimate.reshape(batch, self.n_links, self.n_symbols, self.n_subcarriers)
+        return torch.cat((estimate.real, estimate.imag), dim=1).to(dtype=self.basis_real.dtype)
+
+
 def build_model(name: str, in_channels: int = 8, hidden_channels: int = 64, depth: int = 6) -> nn.Module:
     normalized = name.lower()
     if normalized in {"simplecnn", "simple"}:

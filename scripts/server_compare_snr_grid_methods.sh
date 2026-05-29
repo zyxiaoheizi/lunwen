@@ -34,6 +34,12 @@ fi
 if [[ -f "${OUT_ROOT}/cnn_reesnet/reesnet_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "ReEsNet=${OUT_ROOT}/cnn_reesnet/reesnet_grid_best.pt")
 fi
+if [[ -f "${OUT_ROOT}/ammse_filter/ammse_filter_grid_best.pt" ]]; then
+  CHECKPOINTS+=(--checkpoint "A-MMSE-like=${OUT_ROOT}/ammse_filter/ammse_filter_grid_best.pt")
+fi
+if [[ -f "${OUT_ROOT}/fixed_basis_ridge/fixed_basis_ridge_grid_best.pt" ]]; then
+  CHECKPOINTS+=(--checkpoint "Fixed-Basis Ridge=${OUT_ROOT}/fixed_basis_ridge/fixed_basis_ridge_grid_best.pt")
+fi
 if [[ -f "${OUT_ROOT}/pf_msbnet/pf_msbnet_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "PF-MSBNet=${OUT_ROOT}/pf_msbnet/pf_msbnet_grid_best.pt")
 fi

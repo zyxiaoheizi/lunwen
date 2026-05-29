@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from adapter_mimo_ofdm.models import (  # noqa: E402
+    AdaptiveMMSELinearFilterNet,
+    FixedSharedBasisRidgeNet,
     PilotFittedMIMOSharedBasisNet,
     PilotLockedErrorRefinementNet,
     build_model,
@@ -286,6 +288,35 @@ def torch_nmse_pf_msbnet(
 
 def load_model_from_checkpoint(path: Path, device: torch.device) -> tuple[str, torch.nn.Module, float, int]:
     checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if checkpoint.get("model_type") == "ammse_filter":
+        pilot_positions = checkpoint["pilot_positions"]
+        model = AdaptiveMMSELinearFilterNet(
+            pilot_positions=pilot_positions,
+            n_symbols=int(checkpoint["n_symbols"]),
+            n_subcarriers=int(checkpoint["n_subcarriers"]),
+            n_rx=int(checkpoint.get("n_rx", 2)),
+            n_tx=int(checkpoint.get("n_tx", 2)),
+            rank=int(checkpoint.get("rank", 0)),
+        ).to(device)
+        model.load_state_dict(checkpoint["model"])
+        scale = float(checkpoint.get("scale", 1.0))
+        params = int(checkpoint.get("param_count", count_parameters(model)))
+        return "ammse_filter", model, scale, params
+
+    if checkpoint.get("model_type") == "fixed_basis_ridge":
+        pilot_positions = checkpoint["pilot_positions"]
+        model = FixedSharedBasisRidgeNet(
+            pilot_positions=pilot_positions,
+            basis=checkpoint["basis"],
+            n_rx=int(checkpoint.get("n_rx", 2)),
+            n_tx=int(checkpoint.get("n_tx", 2)),
+            regularization=float(checkpoint.get("regularization", 1e-3)),
+        ).to(device)
+        model.load_state_dict(checkpoint["model"])
+        scale = float(checkpoint.get("scale", 1.0))
+        params = int(checkpoint.get("param_count", count_parameters(model)))
+        return "fixed_basis_ridge", model, scale, params
+
     if checkpoint.get("model_type") == "pf_msbnet":
         pilot_positions = checkpoint["pilot_positions"]
         model = PilotFittedMIMOSharedBasisNet(
@@ -556,7 +587,7 @@ def main() -> None:
             print(f"{dataset_name} | Mismatched 2D LMMSE ({args.lmmse_profile}): {mismatch_nmse_db:.3f} dB")
 
         for display_name, model_name, model, scale, params, checkpoint_path in loaded_models:
-            if model_name == "pf_msbnet":
+            if model_name in {"pf_msbnet", "ammse_filter", "fixed_basis_ridge"}:
                 eval_set = PilotFittedEvalDataset(test_path, scale, args.target_key)
                 checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
                 checkpoint_positions = checkpoint["pilot_positions"].cpu().numpy()
