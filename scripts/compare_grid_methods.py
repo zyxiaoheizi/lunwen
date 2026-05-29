@@ -200,6 +200,7 @@ def estimate_empirical_grid_statistics(
     train_path: Path,
     key: str = "h_true_grid",
     batch_frames: int = 512,
+    center: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """用训练集估计二维时频信道均值和协方差，作为非 oracle LMMSE 先验。
 
@@ -214,19 +215,21 @@ def estimate_empirical_grid_statistics(
         n_observations = n_samples * n_rx * n_tx
         mean = np.zeros(grid_size, dtype=np.complex128)
 
-        for start in range(0, n_samples, batch_frames):
-            chunk = h_grid[start : start + batch_frames]
-            links = np.transpose(chunk, (0, 3, 4, 1, 2)).reshape(-1, grid_size).astype(np.complex128)
-            mean += np.sum(links, axis=0)
-        mean /= float(n_observations)
+        if center:
+            for start in range(0, n_samples, batch_frames):
+                chunk = h_grid[start : start + batch_frames]
+                links = np.transpose(chunk, (0, 3, 4, 1, 2)).reshape(-1, grid_size).astype(np.complex128)
+                mean += np.sum(links, axis=0)
+            mean /= float(n_observations)
 
         cov = np.zeros((grid_size, grid_size), dtype=np.complex128)
         for start in range(0, n_samples, batch_frames):
             chunk = h_grid[start : start + batch_frames]
             links = np.transpose(chunk, (0, 3, 4, 1, 2)).reshape(-1, grid_size).astype(np.complex128)
-            centered = links - mean[None, :]
-            cov += centered.T @ centered.conj()
-        cov /= float(max(n_observations - 1, 1))
+            samples = links - mean[None, :] if center else links
+            cov += samples.T @ samples.conj()
+        normalizer = max(n_observations - 1, 1) if center else max(n_observations, 1)
+        cov /= float(normalizer)
 
     return mean, cov
 
@@ -410,6 +413,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--empirical-lmmse-train", type=Path, default=None)
     parser.add_argument("--empirical-lmmse-key", default="h_true_grid")
     parser.add_argument("--empirical-lmmse-batch-frames", type=int, default=512)
+    parser.add_argument("--include-paper-lmmse", action="store_true")
+    parser.add_argument("--paper-lmmse-train", type=Path, default=None)
+    parser.add_argument("--paper-lmmse-key", default="h_true_grid")
+    parser.add_argument("--paper-lmmse-batch-frames", type=int, default=512)
     parser.add_argument("--include-oracle-lmmse", action="store_true")
     parser.add_argument("--include-mismatched-lmmse", action="store_true")
     parser.add_argument("--lmmse-profile", default="tdl-a")
@@ -424,6 +431,19 @@ def main() -> None:
     device = torch.device(args.device)
     rows: list[dict[str, object]] = []
 
+    paper_lmmse_stats: tuple[np.ndarray, np.ndarray] | None = None
+    if args.include_paper_lmmse or args.paper_lmmse_train is not None:
+        paper_train_path = args.paper_lmmse_train or args.empirical_lmmse_train
+        if paper_train_path is None:
+            raise ValueError("--include-paper-lmmse requires --paper-lmmse-train")
+        print(f"estimating paper-style LMMSE second moment from: {paper_train_path}")
+        paper_lmmse_stats = estimate_empirical_grid_statistics(
+            train_path=paper_train_path,
+            key=args.paper_lmmse_key,
+            batch_frames=args.paper_lmmse_batch_frames,
+            center=False,
+        )
+
     empirical_stats: tuple[np.ndarray, np.ndarray] | None = None
     if args.include_empirical_lmmse or args.empirical_lmmse_train is not None:
         if args.empirical_lmmse_train is None:
@@ -433,6 +453,7 @@ def main() -> None:
             train_path=args.empirical_lmmse_train,
             key=args.empirical_lmmse_key,
             batch_frames=args.empirical_lmmse_batch_frames,
+            center=True,
         )
 
     model_specs = [parse_model_spec(spec) for spec in args.checkpoint]
@@ -462,6 +483,23 @@ def main() -> None:
             }
         )
         print(f"{dataset_name} | LS + 2D interp.: {ls_nmse_db:.3f} dB")
+
+        if paper_lmmse_stats is not None:
+            paper_mean, paper_cov = paper_lmmse_stats
+            h_paper = empirical_lmmse_grid_estimate(data, paper_mean, paper_cov)
+            paper_ri = complex_grid_to_ri(h_paper)
+            paper_nmse, paper_nmse_db = np_nmse(paper_ri, y)
+            rows.append(
+                {
+                    "dataset": dataset_name,
+                    "method": "Paper LMMSE (sample covariance)",
+                    "nmse": paper_nmse,
+                    "nmse_db": paper_nmse_db,
+                    "params": 0,
+                    "checkpoint": str(args.paper_lmmse_train or args.empirical_lmmse_train),
+                }
+            )
+            print(f"{dataset_name} | Paper LMMSE (sample covariance): {paper_nmse_db:.3f} dB")
 
         if empirical_stats is not None:
             empirical_mean, empirical_cov = empirical_stats

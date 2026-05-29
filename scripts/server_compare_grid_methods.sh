@@ -11,6 +11,8 @@ DEVICE="${DEVICE:-cuda}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 LMMSE_PROFILE="${LMMSE_PROFILE:-tdl-a}"
 LMMSE_DELAY_SPREAD_NS="${LMMSE_DELAY_SPREAD_NS:-300}"
+INCLUDE_PAPER_LMMSE="${INCLUDE_PAPER_LMMSE:-1}"
+INCLUDE_EMPIRICAL_LMMSE="${INCLUDE_EMPIRICAL_LMMSE:-1}"
 
 TESTS=(
   "data/grid/grid_${PILOT_TAG}_tdl_a_test_${TEST_SAMPLES}.npz"
@@ -52,10 +54,18 @@ LMMSE_ARGS=(
   --lmmse-delay-spread-ns "${LMMSE_DELAY_SPREAD_NS}"
 )
 if [[ -f "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz" ]]; then
-  LMMSE_ARGS+=(
-    --include-empirical-lmmse
-    --empirical-lmmse-train "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz"
-  )
+  if [[ "${INCLUDE_PAPER_LMMSE}" == "1" ]]; then
+    LMMSE_ARGS+=(
+      --include-paper-lmmse
+      --paper-lmmse-train "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz"
+    )
+  fi
+  if [[ "${INCLUDE_EMPIRICAL_LMMSE}" == "1" ]]; then
+    LMMSE_ARGS+=(
+      --include-empirical-lmmse
+      --empirical-lmmse-train "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz"
+    )
+  fi
 fi
 
 echo "Comparing ${PILOT_TAG}: out_root=${OUT_ROOT}, train_samples=${TRAIN_SAMPLES}, test_samples=${TEST_SAMPLES}"

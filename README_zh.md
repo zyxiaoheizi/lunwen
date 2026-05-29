@@ -621,6 +621,7 @@ outputs/p16/comparison/grid_method_comparison.png
 
 ```text
 LS + 2D interpolation
+Paper LMMSE (sample covariance，论文常见零均值样本协方差版本)
 Empirical 2D LMMSE (用训练集估计协方差，非 oracle)
 Oracle 2D LMMSE
 Mismatched 2D LMMSE (默认假设 TDL-A)
