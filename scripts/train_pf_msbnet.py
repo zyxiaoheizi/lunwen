@@ -60,6 +60,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-attention", action="store_true")
     parser.add_argument("--attention-heads", type=int, default=4)
     parser.add_argument("--attention-layers", type=int, default=1)
+    parser.add_argument("--attention-dropout", type=float, default=0.0)
+    parser.add_argument("--gate-dropout", type=float, default=0.0)
+    parser.add_argument("--basis-dropout", type=float, default=0.0)
+    parser.add_argument("--pilot-noise-std", type=float, default=0.0)
     parser.add_argument("--gate-temperature", type=float, default=1.0)
     parser.add_argument("--disable-learned-pilot-weights", action="store_true")
     parser.add_argument("--disable-learned-regularization", action="store_true")
@@ -68,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-orth", type=float, default=1e-4)
     parser.add_argument("--lambda-gate", type=float, default=1e-5)
     parser.add_argument("--lambda-gate-entropy", type=float, default=0.0)
+    parser.add_argument("--lambda-attention-entropy", type=float, default=0.0)
     parser.add_argument("--basis-init", choices=["pca", "random"], default="pca")
     parser.add_argument("--pca-max-observations", type=int, default=8192)
     parser.add_argument("--pca-seed", type=int, default=1234)
@@ -79,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-normalize", action="store_true")
     parser.add_argument("--early-stopping-patience", type=int, default=20)
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -230,6 +236,10 @@ def main() -> None:
         use_learned_regularization=not args.disable_learned_regularization,
         use_basis_gate=not args.disable_basis_gate,
         gate_temperature=args.gate_temperature,
+        attention_dropout=args.attention_dropout,
+        gate_dropout=args.gate_dropout,
+        basis_dropout=args.basis_dropout,
+        pilot_noise_std=args.pilot_noise_std,
     ).to(device)
     if args.basis_init == "pca":
         basis = pca_basis_from_training_file(
@@ -274,8 +284,14 @@ def main() -> None:
         f"attention={args.use_attention}, heads/layers={args.attention_heads}/{args.attention_layers}"
     )
     print(
+        f"regularization: attention_dropout={args.attention_dropout}, gate_dropout={args.gate_dropout}, "
+        f"basis_dropout={args.basis_dropout}, pilot_noise_std={args.pilot_noise_std}, "
+        f"grad_clip_norm={args.grad_clip_norm}"
+    )
+    print(
         f"lambda_pilot={args.lambda_pilot}, lambda_orth={args.lambda_orth}, "
-        f"lambda_gate={args.lambda_gate}, lambda_gate_entropy={args.lambda_gate_entropy}"
+        f"lambda_gate={args.lambda_gate}, lambda_gate_entropy={args.lambda_gate_entropy}, "
+        f"lambda_attention_entropy={args.lambda_attention_entropy}"
     )
     print(
         "ablation: "
@@ -294,6 +310,7 @@ def main() -> None:
         train_count = 0
         train_gate = 0.0
         train_gate_entropy = 0.0
+        train_attention_entropy = 0.0
         for h_pilot, target in train_loader:
             h_pilot = h_pilot.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
@@ -321,8 +338,16 @@ def main() -> None:
                     entropy_loss = gate_entropy_loss(gate)
                     loss = loss + args.lambda_gate_entropy * entropy_loss
                     train_gate_entropy += float(entropy_loss.item()) * target.shape[0]
+            if args.lambda_attention_entropy > 0:
+                attention_loss = model.attention_entropy_loss()
+                loss = loss + args.lambda_attention_entropy * attention_loss
+                train_attention_entropy += float((-attention_loss).item()) * target.shape[0]
 
+            if torch.isnan(loss):
+                raise FloatingPointError("Training loss became NaN. Try smaller LR or weaker regularization.")
             loss.backward()
+            if args.grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
             optimizer.step()
             batch = target.shape[0]
             train_loss += float(loss.item()) * batch
@@ -337,6 +362,9 @@ def main() -> None:
             "train_gate_mean": train_gate / max(train_count, 1) if args.lambda_gate > 0 else 0.0,
             "train_gate_entropy": (
                 train_gate_entropy / max(train_count, 1) if args.lambda_gate_entropy > 0 else 0.0
+            ),
+            "train_attention_entropy": (
+                train_attention_entropy / max(train_count, 1) if args.lambda_attention_entropy > 0 else 0.0
             ),
             "val_loss": val_metrics["loss"],
             "val_nmse": val_metrics["nmse"],
@@ -371,6 +399,10 @@ def main() -> None:
                     "use_attention": args.use_attention,
                     "attention_heads": args.attention_heads,
                     "attention_layers": args.attention_layers,
+                    "attention_dropout": args.attention_dropout,
+                    "gate_dropout": args.gate_dropout,
+                    "basis_dropout": args.basis_dropout,
+                    "pilot_noise_std": args.pilot_noise_std,
                     "use_learned_pilot_weights": not args.disable_learned_pilot_weights,
                     "use_learned_regularization": not args.disable_learned_regularization,
                     "use_basis_gate": not args.disable_basis_gate,
@@ -392,6 +424,39 @@ def main() -> None:
 
     torch.save({"model_type": "pf_msbnet", "model": model.state_dict(), "args": serializable_args(args)}, last_path)
     write_metrics(metrics_path, rows)
+
+    if best_epoch == 0:
+        torch.save(
+            {
+                "model_type": "pf_msbnet",
+                "model": model.state_dict(),
+                "args": serializable_args(args),
+                "scale": scale,
+                "n_rx": n_rx,
+                "n_tx": n_tx,
+                "n_symbols": n_symbols,
+                "n_subcarriers": n_subcarriers,
+                "pilot_positions": pilot_positions,
+                "num_basis": args.num_basis,
+                "hidden_channels": args.hidden_channels,
+                "pos_bands": args.pos_bands,
+                "min_regularization": args.min_regularization,
+                "use_attention": args.use_attention,
+                "attention_heads": args.attention_heads,
+                "attention_layers": args.attention_layers,
+                "attention_dropout": args.attention_dropout,
+                "gate_dropout": args.gate_dropout,
+                "basis_dropout": args.basis_dropout,
+                "pilot_noise_std": args.pilot_noise_std,
+                "use_learned_pilot_weights": not args.disable_learned_pilot_weights,
+                "use_learned_regularization": not args.disable_learned_regularization,
+                "use_basis_gate": not args.disable_basis_gate,
+                "gate_temperature": args.gate_temperature,
+                "best_val_nmse": best_nmse,
+                "param_count": count_parameters(model),
+            },
+            best_path,
+        )
 
     checkpoint = torch.load(best_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model"])
@@ -423,6 +488,10 @@ def main() -> None:
         "use_attention": args.use_attention,
         "attention_heads": args.attention_heads,
         "attention_layers": args.attention_layers,
+        "attention_dropout": args.attention_dropout,
+        "gate_dropout": args.gate_dropout,
+        "basis_dropout": args.basis_dropout,
+        "pilot_noise_std": args.pilot_noise_std,
         "use_learned_pilot_weights": not args.disable_learned_pilot_weights,
         "use_learned_regularization": not args.disable_learned_regularization,
         "use_basis_gate": not args.disable_basis_gate,

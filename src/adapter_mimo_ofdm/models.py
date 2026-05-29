@@ -236,7 +236,13 @@ class PilotLockedErrorRefinementNet(nn.Module):
 class RelativePilotAttentionLayer(nn.Module):
     """Self-attention over pilot tokens with learned relative time-frequency bias."""
 
-    def __init__(self, hidden_channels: int, num_heads: int, relative_feature_dim: int) -> None:
+    def __init__(
+        self,
+        hidden_channels: int,
+        num_heads: int,
+        relative_feature_dim: int,
+        dropout: float = 0.0,
+    ) -> None:
         super().__init__()
         if hidden_channels % num_heads != 0:
             raise ValueError("hidden_channels must be divisible by num_heads.")
@@ -244,6 +250,7 @@ class RelativePilotAttentionLayer(nn.Module):
         self.num_heads = int(num_heads)
         self.head_dim = self.hidden_channels // self.num_heads
         self.scale = self.head_dim**-0.5
+        self.dropout = nn.Dropout(dropout)
 
         self.norm1 = nn.LayerNorm(hidden_channels)
         self.qkv = nn.Linear(hidden_channels, 3 * hidden_channels)
@@ -257,8 +264,10 @@ class RelativePilotAttentionLayer(nn.Module):
         self.ffn = nn.Sequential(
             nn.Linear(hidden_channels, 2 * hidden_channels),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(2 * hidden_channels, hidden_channels),
         )
+        self.last_attention_entropy: torch.Tensor | None = None
 
     def forward(self, tokens: torch.Tensor, relative_features: torch.Tensor) -> torch.Tensor:
         batch, num_pilots, _ = tokens.shape
@@ -274,6 +283,8 @@ class RelativePilotAttentionLayer(nn.Module):
         rel_bias = self.relative_bias(relative_features).permute(2, 0, 1).unsqueeze(0)
         scores = scores + rel_bias.to(device=tokens.device, dtype=tokens.dtype)
         attn = torch.softmax(scores, dim=-1)
+        self.last_attention_entropy = -torch.sum(attn * torch.log(attn.clamp_min(1e-8)), dim=-1).mean()
+        attn = self.dropout(attn)
         context = torch.matmul(attn, v)
         context = context.transpose(1, 2).reshape(batch, num_pilots, self.hidden_channels)
         tokens = tokens + self.out(context)
@@ -283,7 +294,7 @@ class RelativePilotAttentionLayer(nn.Module):
 class BasisPilotCrossAttention(nn.Module):
     """Let learned basis queries read the current pilot set before gating bases."""
 
-    def __init__(self, hidden_channels: int, num_heads: int, num_basis: int) -> None:
+    def __init__(self, hidden_channels: int, num_heads: int, num_basis: int, dropout: float = 0.0) -> None:
         super().__init__()
         if hidden_channels % num_heads != 0:
             raise ValueError("hidden_channels must be divisible by num_heads.")
@@ -292,6 +303,7 @@ class BasisPilotCrossAttention(nn.Module):
         self.num_basis = int(num_basis)
         self.head_dim = self.hidden_channels // self.num_heads
         self.scale = self.head_dim**-0.5
+        self.dropout = nn.Dropout(dropout)
 
         self.basis_queries = nn.Parameter(torch.empty(num_basis, hidden_channels))
         self.token_norm = nn.LayerNorm(hidden_channels)
@@ -300,6 +312,7 @@ class BasisPilotCrossAttention(nn.Module):
         self.value_proj = nn.Linear(hidden_channels, hidden_channels)
         self.out = nn.Linear(hidden_channels, hidden_channels)
         self.gate_head = nn.Linear(hidden_channels, 1)
+        self.last_attention_entropy: torch.Tensor | None = None
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -316,6 +329,8 @@ class BasisPilotCrossAttention(nn.Module):
         v = self.value_proj(tokens).view(batch, num_pilots, self.num_heads, self.head_dim).transpose(1, 2)
         scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         attn = torch.softmax(scores, dim=-1)
+        self.last_attention_entropy = -torch.sum(attn * torch.log(attn.clamp_min(1e-8)), dim=-1).mean()
+        attn = self.dropout(attn)
         context = torch.matmul(attn, v)
         context = context.transpose(1, 2).reshape(batch, self.num_basis, self.hidden_channels)
         context = self.out(context)
@@ -356,6 +371,10 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         use_learned_regularization: bool = True,
         use_basis_gate: bool = True,
         gate_temperature: float = 1.0,
+        attention_dropout: float = 0.0,
+        gate_dropout: float = 0.0,
+        basis_dropout: float = 0.0,
+        pilot_noise_std: float = 0.0,
     ) -> None:
         super().__init__()
         if pilot_positions.ndim != 2 or pilot_positions.shape[1] != 2:
@@ -378,6 +397,9 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         self.use_learned_regularization = bool(use_learned_regularization)
         self.use_basis_gate = bool(use_basis_gate)
         self.gate_temperature = max(float(gate_temperature), 1e-3)
+        self.gate_dropout = nn.Dropout(float(gate_dropout))
+        self.basis_dropout_probability = float(basis_dropout)
+        self.pilot_noise_std = float(pilot_noise_std)
 
         positions = pilot_positions.to(dtype=torch.long)
         self.register_buffer("pilot_positions", positions)
@@ -399,11 +421,21 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
             relative_dim = int(self.relative_position_features.shape[-1])
             self.attention_encoder = nn.ModuleList(
                 [
-                    RelativePilotAttentionLayer(hidden_channels, self.attention_heads, relative_dim)
+                    RelativePilotAttentionLayer(
+                        hidden_channels,
+                        self.attention_heads,
+                        relative_dim,
+                        dropout=float(attention_dropout),
+                    )
                     for _ in range(self.num_attention_layers)
                 ]
             )
-            self.basis_attention = BasisPilotCrossAttention(hidden_channels, self.attention_heads, num_basis)
+            self.basis_attention = BasisPilotCrossAttention(
+                hidden_channels,
+                self.attention_heads,
+                num_basis,
+                dropout=float(attention_dropout),
+            )
         self.summary_mlp = nn.Sequential(
             nn.Linear(hidden_channels, hidden_channels),
             nn.ReLU(inplace=True),
@@ -494,6 +526,10 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
     def encode_pilots(self, h_pilot: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch, num_pilots = h_pilot.shape[:2]
         links = h_pilot.reshape(batch, num_pilots, self.n_links)
+        if self.training and self.pilot_noise_std > 0:
+            noise_scale = torch.as_tensor(self.pilot_noise_std, device=h_pilot.device, dtype=links.real.dtype)
+            noise = torch.randn_like(links.real) * noise_scale
+            links = torch.complex(links.real + noise, links.imag + torch.randn_like(links.imag) * noise_scale)
         value_features = torch.cat((links.real, links.imag), dim=-1).to(dtype=self.basis.dtype)
         pos_features = self.pilot_position_features.to(device=h_pilot.device, dtype=self.basis.dtype)
         pos_features = pos_features.unsqueeze(0).expand(batch, -1, -1)
@@ -517,6 +553,8 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
             else:
                 gate_logits = self.gate_head(summary)
             gate = self.min_gate + (1.0 - self.min_gate) * torch.sigmoid(gate_logits / self.gate_temperature)
+            if self.training:
+                gate = self.gate_dropout(gate)
         else:
             gate = torch.ones(batch, self.num_basis, device=h_pilot.device, dtype=self.basis.dtype)
 
@@ -539,6 +577,14 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
 
         batch = h_pilot.shape[0]
         pilot_weights, gate, regularization = self.encode_pilots(h_pilot)
+        if self.training:
+            if self.basis_dropout_probability > 0:
+                keep_probability = 1.0 - self.basis_dropout_probability
+                keep = (torch.rand_like(gate) < keep_probability).to(dtype=gate.dtype)
+                if self.num_basis > 0 and torch.any(torch.sum(keep, dim=1) == 0):
+                    fallback = torch.argmax(gate, dim=1)
+                    keep[torch.arange(gate.shape[0], device=gate.device), fallback] = 1.0
+                gate = gate * keep / max(keep_probability, 1e-6)
         basis = self.complex_basis().to(device=h_pilot.device)
         basis_flat = basis.reshape(self.num_basis, self.n_symbols * self.n_subcarriers)
         basis_pilot = basis_flat[:, self.pilot_flat_indices.to(device=h_pilot.device)].transpose(0, 1)
@@ -566,6 +612,18 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         gram = basis @ basis.conj().transpose(0, 1)
         eye = torch.eye(self.num_basis, device=basis.device, dtype=basis.dtype)
         return torch.mean(torch.abs(gram - eye) ** 2).real
+
+    def attention_entropy_loss(self) -> torch.Tensor:
+        entropies: list[torch.Tensor] = []
+        if self.use_attention:
+            for layer in self.attention_encoder:
+                if layer.last_attention_entropy is not None:
+                    entropies.append(layer.last_attention_entropy)
+            if self.basis_attention.last_attention_entropy is not None:
+                entropies.append(self.basis_attention.last_attention_entropy)
+        if not entropies:
+            return self.basis.sum() * 0.0
+        return -torch.stack(entropies).mean()
 
 
 def build_model(name: str, in_channels: int = 8, hidden_channels: int = 64, depth: int = 6) -> nn.Module:
