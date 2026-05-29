@@ -544,6 +544,7 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         gate_dropout: float = 0.0,
         basis_dropout: float = 0.0,
         pilot_noise_std: float = 0.0,
+        active_basis_topk: int = 0,
     ) -> None:
         super().__init__()
         if pilot_positions.ndim != 2 or pilot_positions.shape[1] != 2:
@@ -575,6 +576,7 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         self.gate_dropout = nn.Dropout(float(gate_dropout))
         self.basis_dropout_probability = float(basis_dropout)
         self.pilot_noise_std = float(pilot_noise_std)
+        self.active_basis_topk = int(active_basis_topk)
 
         positions = pilot_positions.to(dtype=torch.long)
         self.register_buffer("pilot_positions", positions)
@@ -779,14 +781,32 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         basis_flat = basis.reshape(self.num_basis, self.n_symbols * self.n_subcarriers)
         basis_pilot = basis_flat[:, self.pilot_flat_indices.to(device=h_pilot.device)].transpose(0, 1)
 
-        sqrt_gate = torch.sqrt(gate).to(dtype=basis.dtype)
-        gated_basis_pilot = basis_pilot.unsqueeze(0) * sqrt_gate.unsqueeze(1)
-        gated_basis_full = basis_flat.unsqueeze(0) * sqrt_gate.unsqueeze(-1)
+        if 0 < self.active_basis_topk < self.num_basis:
+            active_count = min(int(self.active_basis_topk), self.num_basis)
+            topk_indices = torch.topk(gate, k=active_count, dim=1).indices
+            active_gate = torch.gather(gate, dim=1, index=topk_indices)
+
+            basis_pilot_batch = basis_pilot.unsqueeze(0).expand(batch, -1, -1)
+            pilot_gather_index = topk_indices.unsqueeze(1).expand(-1, basis_pilot.shape[0], -1)
+            active_basis_pilot = torch.gather(basis_pilot_batch, dim=2, index=pilot_gather_index)
+
+            basis_flat_batch = basis_flat.unsqueeze(0).expand(batch, -1, -1)
+            full_gather_index = topk_indices.unsqueeze(-1).expand(-1, -1, basis_flat.shape[1])
+            active_basis_full = torch.gather(basis_flat_batch, dim=1, index=full_gather_index)
+        else:
+            active_count = self.num_basis
+            active_gate = gate
+            active_basis_pilot = basis_pilot.unsqueeze(0).expand(batch, -1, -1)
+            active_basis_full = basis_flat.unsqueeze(0).expand(batch, -1, -1)
+
+        sqrt_gate = torch.sqrt(active_gate).to(dtype=basis.dtype)
+        gated_basis_pilot = active_basis_pilot * sqrt_gate.unsqueeze(1)
+        gated_basis_full = active_basis_full * sqrt_gate.unsqueeze(-1)
 
         sqrt_weight = torch.sqrt(pilot_weights).to(dtype=basis.dtype).unsqueeze(-1)
         weighted_pilot_basis = gated_basis_pilot * sqrt_weight
         gram = torch.matmul(weighted_pilot_basis.conj().transpose(-2, -1), weighted_pilot_basis)
-        eye = torch.eye(self.num_basis, device=h_pilot.device, dtype=basis.dtype).unsqueeze(0)
+        eye = torch.eye(active_count, device=h_pilot.device, dtype=basis.dtype).unsqueeze(0)
         gram = gram + regularization.to(dtype=basis.real.dtype).view(batch, 1, 1) * eye
 
         h_links = h_pilot.reshape(batch, h_pilot.shape[1], self.n_links)

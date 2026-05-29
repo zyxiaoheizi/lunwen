@@ -312,6 +312,7 @@ def load_model_from_checkpoint(path: Path, device: torch.device) -> tuple[str, t
             gate_dropout=float(checkpoint.get("gate_dropout", 0.0)),
             basis_dropout=float(checkpoint.get("basis_dropout", 0.0)),
             pilot_noise_std=float(checkpoint.get("pilot_noise_std", 0.0)),
+            active_basis_topk=int(checkpoint.get("active_basis_topk", 0)),
         ).to(device)
         model.load_state_dict(checkpoint["model"])
         scale = float(checkpoint.get("scale", 1.0))

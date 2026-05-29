@@ -373,8 +373,10 @@ def channelnet_uniform_pilot_positions(
             flat = [4 + 14 * i for i in range(1, 72, 9)] + [9 + 14 * i for i in range(4, 72, 9)]
         elif num_pilots == 8:
             flat = [4 + 14 * i for i in range(5, 72, 18)] + [9 + 14 * i for i in range(8, 72, 18)]
+        elif num_pilots == 4:
+            flat = [4 + 14 * 8, 9 + 14 * 26, 4 + 14 * 44, 9 + 14 * 62]
         else:
-            raise ValueError("ChannelNet-style pilot count must be one of 8, 16, 24, 36, 48.")
+            raise ValueError("ChannelNet-style pilot count must be one of 4, 8, 16, 24, 36, 48.")
         return np.asarray([(idx % 14, idx // 14) for idx in flat], dtype=np.int64)
 
     # 非 72x14 时退化为规则网格，保证函数也能用于小规模 sanity check。
