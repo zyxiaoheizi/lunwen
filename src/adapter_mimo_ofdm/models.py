@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class ResidualBlock2D(nn.Module):
@@ -230,6 +231,179 @@ class PilotLockedErrorRefinementNet(nn.Module):
             base_estimate = self.base_model(x)
         residual = self.refiner(x, base_estimate.detach() if self.freeze_base else base_estimate, self.pilot_mask)
         return base_estimate + residual
+
+
+class PilotFittedMIMOSharedBasisNet(nn.Module):
+    """Pilot-fitted MIMO shared-basis estimator.
+
+    The model does not use the interpolated LS grid as input. It learns a set of
+    shared time-frequency basis maps, then fits the per-frame MIMO link
+    coefficients from the raw pilot LS observations through a differentiable
+    weighted ridge step.
+
+    Input:
+        h_pilot: complex tensor [batch, pilot, rx, tx].
+
+    Output:
+        real/imag tensor [batch, 2*rx*tx, n_symbols, n_subcarriers].
+    """
+
+    def __init__(
+        self,
+        pilot_positions: torch.Tensor,
+        n_symbols: int = 14,
+        n_subcarriers: int = 72,
+        n_rx: int = 2,
+        n_tx: int = 2,
+        num_basis: int = 32,
+        hidden_channels: int = 128,
+        pos_bands: int = 6,
+        min_gate: float = 0.05,
+        min_regularization: float = 1e-4,
+    ) -> None:
+        super().__init__()
+        if pilot_positions.ndim != 2 or pilot_positions.shape[1] != 2:
+            raise ValueError("pilot_positions must have shape [pilot, 2].")
+
+        self.n_symbols = int(n_symbols)
+        self.n_subcarriers = int(n_subcarriers)
+        self.n_rx = int(n_rx)
+        self.n_tx = int(n_tx)
+        self.n_links = self.n_rx * self.n_tx
+        self.num_basis = int(num_basis)
+        self.hidden_channels = int(hidden_channels)
+        self.pos_bands = int(pos_bands)
+        self.min_gate = float(min_gate)
+        self.min_regularization = float(min_regularization)
+
+        positions = pilot_positions.to(dtype=torch.long)
+        self.register_buffer("pilot_positions", positions)
+        pilot_flat = positions[:, 0] * self.n_subcarriers + positions[:, 1]
+        self.register_buffer("pilot_flat_indices", pilot_flat.to(dtype=torch.long))
+        self.register_buffer("pilot_position_features", self._position_features(positions))
+
+        pos_dim = int(self.pilot_position_features.shape[1])
+        token_dim = 2 * self.n_links + pos_dim
+        self.token_mlp = nn.Sequential(
+            nn.Linear(token_dim, hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.weight_head = nn.Linear(hidden_channels, 1)
+        self.summary_mlp = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.gate_head = nn.Linear(hidden_channels, num_basis)
+        self.regularization_head = nn.Linear(hidden_channels, 1)
+
+        self.basis = nn.Parameter(torch.empty(num_basis, 2, self.n_symbols, self.n_subcarriers))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.basis, mean=0.0, std=1.0 / (self.n_symbols * self.n_subcarriers) ** 0.5)
+        nn.init.constant_(self.regularization_head.bias, -7.0)
+        nn.init.zeros_(self.gate_head.bias)
+        nn.init.zeros_(self.weight_head.bias)
+
+    def _position_features(self, positions: torch.Tensor) -> torch.Tensor:
+        pos = positions.to(dtype=torch.float32)
+        if self.n_symbols > 1:
+            t = pos[:, 0] / float(self.n_symbols - 1)
+        else:
+            t = pos[:, 0]
+        if self.n_subcarriers > 1:
+            f = pos[:, 1] / float(self.n_subcarriers - 1)
+        else:
+            f = pos[:, 1]
+
+        features = [t, f]
+        for band in range(self.pos_bands):
+            freq = float(2 ** band)
+            features.extend(
+                [
+                    torch.sin(2.0 * torch.pi * freq * t),
+                    torch.cos(2.0 * torch.pi * freq * t),
+                    torch.sin(2.0 * torch.pi * freq * f),
+                    torch.cos(2.0 * torch.pi * freq * f),
+                ]
+            )
+        return torch.stack(features, dim=1)
+
+    @torch.no_grad()
+    def set_complex_basis(self, basis: torch.Tensor) -> None:
+        """Initialize learned basis from a complex tensor [basis, symbol, subcarrier]."""
+
+        if basis.ndim != 3:
+            raise ValueError("basis must have shape [basis, symbol, subcarrier].")
+        if basis.shape[0] != self.num_basis:
+            raise ValueError(f"basis count mismatch: expected {self.num_basis}, got {basis.shape[0]}.")
+        if basis.shape[1:] != (self.n_symbols, self.n_subcarriers):
+            raise ValueError("basis grid shape mismatch.")
+
+        if not torch.is_complex(basis):
+            raise ValueError("basis must be complex.")
+        target = torch.stack((basis.real, basis.imag), dim=1).to(device=self.basis.device, dtype=self.basis.dtype)
+        self.basis.copy_(target)
+
+    def complex_basis(self) -> torch.Tensor:
+        return torch.complex(self.basis[:, 0], self.basis[:, 1])
+
+    def encode_pilots(self, h_pilot: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch, num_pilots = h_pilot.shape[:2]
+        links = h_pilot.reshape(batch, num_pilots, self.n_links)
+        value_features = torch.cat((links.real, links.imag), dim=-1).to(dtype=self.basis.dtype)
+        pos_features = self.pilot_position_features.to(device=h_pilot.device, dtype=self.basis.dtype)
+        pos_features = pos_features.unsqueeze(0).expand(batch, -1, -1)
+        tokens = self.token_mlp(torch.cat((value_features, pos_features), dim=-1))
+
+        pilot_weights = F.softplus(self.weight_head(tokens)).squeeze(-1) + 1e-4
+        alpha = pilot_weights / pilot_weights.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        summary = torch.sum(tokens * alpha.unsqueeze(-1), dim=1)
+        summary = self.summary_mlp(summary)
+
+        gate = self.min_gate + (1.0 - self.min_gate) * torch.sigmoid(self.gate_head(summary))
+        regularization = self.min_regularization + F.softplus(self.regularization_head(summary)).squeeze(-1)
+        return pilot_weights, gate, regularization
+
+    def forward(self, h_pilot: torch.Tensor) -> torch.Tensor:
+        if not torch.is_complex(h_pilot):
+            raise ValueError("PilotFittedMIMOSharedBasisNet expects complex h_pilot input.")
+        if h_pilot.shape[2] != self.n_rx or h_pilot.shape[3] != self.n_tx:
+            raise ValueError("h_pilot rx/tx dimensions do not match model metadata.")
+
+        batch = h_pilot.shape[0]
+        pilot_weights, gate, regularization = self.encode_pilots(h_pilot)
+        basis = self.complex_basis().to(device=h_pilot.device)
+        basis_flat = basis.reshape(self.num_basis, self.n_symbols * self.n_subcarriers)
+        basis_pilot = basis_flat[:, self.pilot_flat_indices.to(device=h_pilot.device)].transpose(0, 1)
+
+        sqrt_gate = torch.sqrt(gate).to(dtype=basis.dtype)
+        gated_basis_pilot = basis_pilot.unsqueeze(0) * sqrt_gate.unsqueeze(1)
+        gated_basis_full = basis_flat.unsqueeze(0) * sqrt_gate.unsqueeze(-1)
+
+        sqrt_weight = torch.sqrt(pilot_weights).to(dtype=basis.dtype).unsqueeze(-1)
+        weighted_pilot_basis = gated_basis_pilot * sqrt_weight
+        gram = torch.matmul(weighted_pilot_basis.conj().transpose(-2, -1), weighted_pilot_basis)
+        eye = torch.eye(self.num_basis, device=h_pilot.device, dtype=basis.dtype).unsqueeze(0)
+        gram = gram + regularization.to(dtype=basis.real.dtype).view(batch, 1, 1) * eye
+
+        h_links = h_pilot.reshape(batch, h_pilot.shape[1], self.n_links)
+        rhs = torch.matmul(gated_basis_pilot.conj().transpose(-2, -1), h_links * pilot_weights.unsqueeze(-1))
+        coeff = torch.linalg.solve(gram, rhs)
+        estimate = torch.einsum("bml,bmg->blg", coeff, gated_basis_full)
+        estimate = estimate.reshape(batch, self.n_links, self.n_symbols, self.n_subcarriers)
+        return torch.cat((estimate.real, estimate.imag), dim=1).to(dtype=self.basis.dtype)
+
+    def basis_orthogonality_loss(self) -> torch.Tensor:
+        basis = self.complex_basis().reshape(self.num_basis, -1)
+        basis = basis / torch.linalg.vector_norm(basis, dim=1, keepdim=True).clamp_min(1e-8)
+        gram = basis @ basis.conj().transpose(0, 1)
+        eye = torch.eye(self.num_basis, device=basis.device, dtype=basis.dtype)
+        return torch.mean(torch.abs(gram - eye) ** 2).real
 
 
 def build_model(name: str, in_channels: int = 8, hidden_channels: int = 64, depth: int = 6) -> nn.Module:

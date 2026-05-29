@@ -15,7 +15,12 @@ from torch.utils.data import DataLoader, Dataset
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from adapter_mimo_ofdm.models import PilotLockedErrorRefinementNet, build_model, count_parameters  # noqa: E402
+from adapter_mimo_ofdm.models import (  # noqa: E402
+    PilotFittedMIMOSharedBasisNet,
+    PilotLockedErrorRefinementNet,
+    build_model,
+    count_parameters,
+)
 from adapter_mimo_ofdm.sim import resolve_delay_profile  # noqa: E402
 
 
@@ -31,6 +36,21 @@ class GridEvalDataset(Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.from_numpy(self.x[index]), torch.from_numpy(self.y[index])
+
+
+class PilotFittedEvalDataset(Dataset):
+    def __init__(self, path: str | Path, scale: float, target_key: str = "h_true_grid_ri") -> None:
+        data = np.load(path)
+        self.h_pilot = data["h_pilot_ls"].astype(np.complex64) / scale
+        self.y = data[target_key].astype(np.float32) / scale
+        self.pilot_positions = data["pilot_positions"].astype(np.int64)
+        self.path = Path(path)
+
+    def __len__(self) -> int:
+        return int(self.y.shape[0])
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.from_numpy(self.h_pilot[index]), torch.from_numpy(self.y[index])
 
 
 def parse_model_spec(spec: str) -> tuple[str, Path]:
@@ -240,8 +260,47 @@ def torch_nmse(
     return nmse, nmse_db(nmse)
 
 
+@torch.no_grad()
+def torch_nmse_pf_msbnet(
+    model: PilotFittedMIMOSharedBasisNet,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[float, float]:
+    model.eval()
+    total = 0.0
+    count = 0
+    for h_pilot, y in loader:
+        h_pilot = h_pilot.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        pred = model(h_pilot)
+        err = torch.sum((pred - y) ** 2, dim=(1, 2, 3))
+        ref = torch.sum(y**2, dim=(1, 2, 3)).clamp_min(1e-12)
+        total += float(torch.sum(err / ref).item())
+        count += int(y.shape[0])
+    nmse = total / max(count, 1)
+    return nmse, nmse_db(nmse)
+
+
 def load_model_from_checkpoint(path: Path, device: torch.device) -> tuple[str, torch.nn.Module, float, int]:
     checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if checkpoint.get("model_type") == "pf_msbnet":
+        pilot_positions = checkpoint["pilot_positions"]
+        model = PilotFittedMIMOSharedBasisNet(
+            pilot_positions=pilot_positions,
+            n_symbols=int(checkpoint["n_symbols"]),
+            n_subcarriers=int(checkpoint["n_subcarriers"]),
+            n_rx=int(checkpoint.get("n_rx", 2)),
+            n_tx=int(checkpoint.get("n_tx", 2)),
+            num_basis=int(checkpoint.get("num_basis", 32)),
+            hidden_channels=int(checkpoint.get("hidden_channels", 128)),
+            pos_bands=int(checkpoint.get("pos_bands", 6)),
+            min_regularization=float(checkpoint.get("min_regularization", 1e-4)),
+        ).to(device)
+        model.load_state_dict(checkpoint["model"])
+        scale = float(checkpoint.get("scale", 1.0))
+        params = int(checkpoint.get("param_count", count_parameters(model)))
+        return "pf_msbnet", model, scale, params
+
     if checkpoint.get("model_type") == "plern":
         base_meta = checkpoint["base_model"]
         base_model_name = str(base_meta["model"])
@@ -359,13 +418,13 @@ def main() -> None:
         )
 
     model_specs = [parse_model_spec(spec) for spec in args.checkpoint]
-    loaded_models: list[tuple[str, torch.nn.Module, float, int, Path]] = []
+    loaded_models: list[tuple[str, str, torch.nn.Module, float, int, Path]] = []
     for display_name, checkpoint_path in model_specs:
         if not checkpoint_path.exists():
             print(f"skip missing checkpoint: {checkpoint_path}")
             continue
         model_name, model, scale, params = load_model_from_checkpoint(checkpoint_path, device)
-        loaded_models.append((display_name, model, scale, params, checkpoint_path))
+        loaded_models.append((display_name, model_name, model, scale, params, checkpoint_path))
         print(f"loaded {display_name}: model={model_name}, params={params}, scale={scale:.6g}")
 
     for test_path in args.test:
@@ -440,16 +499,32 @@ def main() -> None:
             )
             print(f"{dataset_name} | Mismatched 2D LMMSE ({args.lmmse_profile}): {mismatch_nmse_db:.3f} dB")
 
-        for display_name, model, scale, params, checkpoint_path in loaded_models:
-            eval_set = GridEvalDataset(test_path, args.input_key, args.target_key, scale)
-            loader = DataLoader(
-                eval_set,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=args.num_workers,
-                pin_memory=device.type == "cuda",
-            )
-            model_nmse, model_nmse_db = torch_nmse(model, loader, device)
+        for display_name, model_name, model, scale, params, checkpoint_path in loaded_models:
+            if model_name == "pf_msbnet":
+                eval_set = PilotFittedEvalDataset(test_path, scale, args.target_key)
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+                checkpoint_positions = checkpoint["pilot_positions"].cpu().numpy()
+                if not np.array_equal(checkpoint_positions, eval_set.pilot_positions):
+                    print(f"skip {display_name} on {dataset_name}: pilot_positions differ")
+                    continue
+                loader = DataLoader(
+                    eval_set,
+                    batch_size=args.batch_size,
+                    shuffle=False,
+                    num_workers=args.num_workers,
+                    pin_memory=device.type == "cuda",
+                )
+                model_nmse, model_nmse_db = torch_nmse_pf_msbnet(model, loader, device)
+            else:
+                eval_set = GridEvalDataset(test_path, args.input_key, args.target_key, scale)
+                loader = DataLoader(
+                    eval_set,
+                    batch_size=args.batch_size,
+                    shuffle=False,
+                    num_workers=args.num_workers,
+                    pin_memory=device.type == "cuda",
+                )
+                model_nmse, model_nmse_db = torch_nmse(model, loader, device)
             rows.append(
                 {
                     "dataset": dataset_name,
