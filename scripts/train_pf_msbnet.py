@@ -60,6 +60,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-attention", action="store_true")
     parser.add_argument("--attention-heads", type=int, default=4)
     parser.add_argument("--attention-layers", type=int, default=1)
+    parser.add_argument("--token-encoder", choices=["flat", "mimo_tokenformer"], default="flat")
+    parser.add_argument("--link-attention-heads", type=int, default=0)
+    parser.add_argument("--link-attention-layers", type=int, default=1)
+    parser.add_argument("--link-attention-dropout", type=float, default=-1.0)
     parser.add_argument("--attention-dropout", type=float, default=0.0)
     parser.add_argument("--gate-dropout", type=float, default=0.0)
     parser.add_argument("--basis-dropout", type=float, default=0.0)
@@ -232,6 +236,10 @@ def main() -> None:
         use_attention=args.use_attention,
         attention_heads=args.attention_heads,
         attention_layers=args.attention_layers,
+        token_encoder=args.token_encoder,
+        link_attention_heads=None if args.link_attention_heads <= 0 else args.link_attention_heads,
+        link_attention_layers=args.link_attention_layers,
+        link_attention_dropout=None if args.link_attention_dropout < 0 else args.link_attention_dropout,
         use_learned_pilot_weights=not args.disable_learned_pilot_weights,
         use_learned_regularization=not args.disable_learned_regularization,
         use_basis_gate=not args.disable_basis_gate,
@@ -282,6 +290,11 @@ def main() -> None:
     print(
         f"basis={args.num_basis}, hidden={args.hidden_channels}, basis_init={args.basis_init}, "
         f"attention={args.use_attention}, heads/layers={args.attention_heads}/{args.attention_layers}"
+    )
+    print(
+        f"token_encoder={args.token_encoder}, "
+        f"link_heads/layers={args.link_attention_heads or args.attention_heads}/{args.link_attention_layers}, "
+        f"link_dropout={args.attention_dropout if args.link_attention_dropout < 0 else args.link_attention_dropout}"
     )
     print(
         f"regularization: attention_dropout={args.attention_dropout}, gate_dropout={args.gate_dropout}, "
@@ -399,6 +412,12 @@ def main() -> None:
                     "use_attention": args.use_attention,
                     "attention_heads": args.attention_heads,
                     "attention_layers": args.attention_layers,
+                    "token_encoder": args.token_encoder,
+                    "link_attention_heads": args.link_attention_heads or args.attention_heads,
+                    "link_attention_layers": args.link_attention_layers,
+                    "link_attention_dropout": args.attention_dropout
+                    if args.link_attention_dropout < 0
+                    else args.link_attention_dropout,
                     "attention_dropout": args.attention_dropout,
                     "gate_dropout": args.gate_dropout,
                     "basis_dropout": args.basis_dropout,
@@ -444,6 +463,12 @@ def main() -> None:
                 "use_attention": args.use_attention,
                 "attention_heads": args.attention_heads,
                 "attention_layers": args.attention_layers,
+                "token_encoder": args.token_encoder,
+                "link_attention_heads": args.link_attention_heads or args.attention_heads,
+                "link_attention_layers": args.link_attention_layers,
+                "link_attention_dropout": args.attention_dropout
+                if args.link_attention_dropout < 0
+                else args.link_attention_dropout,
                 "attention_dropout": args.attention_dropout,
                 "gate_dropout": args.gate_dropout,
                 "basis_dropout": args.basis_dropout,
@@ -486,8 +511,12 @@ def main() -> None:
         "best_epoch": best_epoch,
         "basis_init": args.basis_init,
         "use_attention": args.use_attention,
+        "token_encoder": args.token_encoder,
         "attention_heads": args.attention_heads,
         "attention_layers": args.attention_layers,
+        "link_attention_heads": args.link_attention_heads or args.attention_heads,
+        "link_attention_layers": args.link_attention_layers,
+        "link_attention_dropout": args.attention_dropout if args.link_attention_dropout < 0 else args.link_attention_dropout,
         "attention_dropout": args.attention_dropout,
         "gate_dropout": args.gate_dropout,
         "basis_dropout": args.basis_dropout,

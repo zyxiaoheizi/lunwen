@@ -23,6 +23,10 @@ PCA_MAX_OBSERVATIONS="${PCA_MAX_OBSERVATIONS:-8192}"
 USE_ATTENTION="${USE_ATTENTION:-0}"
 ATTENTION_HEADS="${ATTENTION_HEADS:-4}"
 ATTENTION_LAYERS="${ATTENTION_LAYERS:-1}"
+TOKEN_ENCODER="${TOKEN_ENCODER:-flat}"
+LINK_ATTENTION_HEADS="${LINK_ATTENTION_HEADS:-0}"
+LINK_ATTENTION_LAYERS="${LINK_ATTENTION_LAYERS:-1}"
+LINK_ATTENTION_DROPOUT="${LINK_ATTENTION_DROPOUT:--1}"
 ATTENTION_DROPOUT="${ATTENTION_DROPOUT:-0}"
 GATE_DROPOUT="${GATE_DROPOUT:-0}"
 BASIS_DROPOUT="${BASIS_DROPOUT:-0}"
@@ -48,7 +52,9 @@ TEST_TDLB="${TEST_TDLB:-data/grid/grid_${PILOT_TAG}_tdl_b_test_4000.npz}"
 TEST_TDLC="${TEST_TDLC:-data/grid/grid_${PILOT_TAG}_tdl_c_test_4000.npz}"
 TEST_RICIAN="${TEST_RICIAN:-data/grid/grid_${PILOT_TAG}_rician_tdl_a_test_4000.npz}"
 if [[ -z "${OUTDIR:-}" ]]; then
-  if [[ "${USE_ATTENTION}" == "1" ]]; then
+  if [[ "${TOKEN_ENCODER}" == "mimo_tokenformer" ]]; then
+    OUTDIR="${OUT_ROOT}/pf_msbnet_a2"
+  elif [[ "${USE_ATTENTION}" == "1" ]]; then
     OUTDIR="${OUT_ROOT}/pf_msbnet_a"
   else
     OUTDIR="${OUT_ROOT}/pf_msbnet"
@@ -74,6 +80,7 @@ echo "Training PF-MSBNet for ${PILOT_TAG}"
 echo "epochs=${EPOCHS}, batch_size=${BATCH_SIZE}, lr=${LR}, device=${DEVICE}"
 echo "basis=${NUM_BASIS}, hidden=${HIDDEN_CHANNELS}, pos_bands=${POS_BANDS}, basis_init=${BASIS_INIT}"
 echo "attention=${USE_ATTENTION}, heads/layers=${ATTENTION_HEADS}/${ATTENTION_LAYERS}, gate_temperature=${GATE_TEMPERATURE}"
+echo "token_encoder=${TOKEN_ENCODER}, link_heads/layers=${LINK_ATTENTION_HEADS}/${LINK_ATTENTION_LAYERS}, link_dropout=${LINK_ATTENTION_DROPOUT}"
 echo "regularization: attention_dropout=${ATTENTION_DROPOUT}, gate_dropout=${GATE_DROPOUT}, basis_dropout=${BASIS_DROPOUT}, pilot_noise_std=${PILOT_NOISE_STD}, grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "lambda_pilot=${LAMBDA_PILOT}, lambda_orth=${LAMBDA_ORTH}, lambda_gate=${LAMBDA_GATE}, lambda_gate_entropy=${LAMBDA_GATE_ENTROPY}, lambda_attention_entropy=${LAMBDA_ATTENTION_ENTROPY}, min_reg=${MIN_REGULARIZATION}"
 echo "ablation: disable_W=${DISABLE_LEARNED_PILOT_WEIGHTS}, disable_lambda=${DISABLE_LEARNED_REGULARIZATION}, disable_gate=${DISABLE_BASIS_GATE}"
@@ -94,6 +101,10 @@ echo "outdir=${OUTDIR}"
   --pca-max-observations "${PCA_MAX_OBSERVATIONS}" \
   --attention-heads "${ATTENTION_HEADS}" \
   --attention-layers "${ATTENTION_LAYERS}" \
+  --token-encoder "${TOKEN_ENCODER}" \
+  --link-attention-heads "${LINK_ATTENTION_HEADS}" \
+  --link-attention-layers "${LINK_ATTENTION_LAYERS}" \
+  --link-attention-dropout "${LINK_ATTENTION_DROPOUT}" \
   --attention-dropout "${ATTENTION_DROPOUT}" \
   --gate-dropout "${GATE_DROPOUT}" \
   --basis-dropout "${BASIS_DROPOUT}" \

@@ -298,6 +298,12 @@ def load_model_from_checkpoint(path: Path, device: torch.device) -> tuple[str, t
             use_attention=bool(checkpoint.get("use_attention", False)),
             attention_heads=int(checkpoint.get("attention_heads", 4)),
             attention_layers=int(checkpoint.get("attention_layers", 1)),
+            token_encoder=str(checkpoint.get("token_encoder", "flat")),
+            link_attention_heads=int(checkpoint.get("link_attention_heads", checkpoint.get("attention_heads", 4))),
+            link_attention_layers=int(checkpoint.get("link_attention_layers", 1)),
+            link_attention_dropout=float(
+                checkpoint.get("link_attention_dropout", checkpoint.get("attention_dropout", 0.0))
+            ),
             use_learned_pilot_weights=bool(checkpoint.get("use_learned_pilot_weights", True)),
             use_learned_regularization=bool(checkpoint.get("use_learned_regularization", True)),
             use_basis_gate=bool(checkpoint.get("use_basis_gate", True)),

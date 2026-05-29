@@ -337,6 +337,171 @@ class BasisPilotCrossAttention(nn.Module):
         return self.gate_head(context).squeeze(-1)
 
 
+class MIMOLinkAttentionLayer(nn.Module):
+    """Self-attention over Tx/Rx link tokens inside one pilot observation.
+
+    The relative bias is generated from the pairwise Rx/Tx relation instead of
+    from a generic token index. This keeps the token encoder aware that H11,
+    H12, H21, and H22 are MIMO links sharing the same physical scatterers.
+    """
+
+    def __init__(
+        self,
+        hidden_channels: int,
+        num_heads: int,
+        pair_feature_dim: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if hidden_channels % num_heads != 0:
+            raise ValueError("hidden_channels must be divisible by num_heads.")
+        self.hidden_channels = int(hidden_channels)
+        self.num_heads = int(num_heads)
+        self.head_dim = self.hidden_channels // self.num_heads
+        self.scale = self.head_dim**-0.5
+        self.dropout = nn.Dropout(dropout)
+
+        self.norm1 = nn.LayerNorm(hidden_channels)
+        self.qkv = nn.Linear(hidden_channels, 3 * hidden_channels)
+        self.link_bias = nn.Sequential(
+            nn.Linear(pair_feature_dim, hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, num_heads),
+        )
+        self.out = nn.Linear(hidden_channels, hidden_channels)
+        self.norm2 = nn.LayerNorm(hidden_channels)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_channels, 2 * hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(2 * hidden_channels, hidden_channels),
+        )
+        self.last_attention_entropy: torch.Tensor | None = None
+
+    def forward(self, tokens: torch.Tensor, link_pair_features: torch.Tensor) -> torch.Tensor:
+        batch_pilots, num_links, _ = tokens.shape
+        normalized = self.norm1(tokens)
+        qkv = self.qkv(normalized)
+        qkv = qkv.view(batch_pilots, num_links, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        link_bias = self.link_bias(link_pair_features).permute(2, 0, 1).unsqueeze(0)
+        scores = scores + link_bias.to(device=tokens.device, dtype=tokens.dtype)
+        attn = torch.softmax(scores, dim=-1)
+        self.last_attention_entropy = -torch.sum(attn * torch.log(attn.clamp_min(1e-8)), dim=-1).mean()
+        attn = self.dropout(attn)
+        context = torch.matmul(attn, v)
+        context = context.transpose(1, 2).reshape(batch_pilots, num_links, self.hidden_channels)
+        tokens = tokens + self.out(context)
+        return tokens + self.ffn(self.norm2(tokens))
+
+
+class MIMOStructuredPilotTokenFormerEncoder(nn.Module):
+    """Encode each pilot through MIMO link tokens before pilot-level attention."""
+
+    def __init__(
+        self,
+        n_rx: int,
+        n_tx: int,
+        pos_dim: int,
+        hidden_channels: int,
+        num_heads: int,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if num_layers < 1:
+            raise ValueError("num_layers must be at least 1.")
+        self.n_rx = int(n_rx)
+        self.n_tx = int(n_tx)
+        self.n_links = self.n_rx * self.n_tx
+        self.hidden_channels = int(hidden_channels)
+
+        self.value_projection = nn.Sequential(
+            nn.Linear(5 + int(pos_dim), hidden_channels),
+            nn.GELU(),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+        self.rx_embedding = nn.Embedding(self.n_rx, hidden_channels)
+        self.tx_embedding = nn.Embedding(self.n_tx, hidden_channels)
+        self.link_layers = nn.ModuleList(
+            [
+                MIMOLinkAttentionLayer(
+                    hidden_channels=hidden_channels,
+                    num_heads=num_heads,
+                    pair_feature_dim=6,
+                    dropout=dropout,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.link_pool = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, 1),
+        )
+        self.out_norm = nn.LayerNorm(hidden_channels)
+
+        rx_ids = torch.arange(self.n_rx).repeat_interleave(self.n_tx)
+        tx_ids = torch.arange(self.n_tx).repeat(self.n_rx)
+        self.register_buffer("link_rx_ids", rx_ids.to(dtype=torch.long), persistent=False)
+        self.register_buffer("link_tx_ids", tx_ids.to(dtype=torch.long), persistent=False)
+        self.register_buffer("link_pair_features", self._link_pair_features(rx_ids, tx_ids), persistent=False)
+
+    def _link_pair_features(self, rx_ids: torch.Tensor, tx_ids: torch.Tensor) -> torch.Tensor:
+        rx = rx_ids.to(dtype=torch.float32)
+        tx = tx_ids.to(dtype=torch.float32)
+        rx_scale = float(max(self.n_rx - 1, 1))
+        tx_scale = float(max(self.n_tx - 1, 1))
+        drx = (rx[:, None] - rx[None, :]) / rx_scale
+        dtx = (tx[:, None] - tx[None, :]) / tx_scale
+        same_rx = (rx[:, None] == rx[None, :]).to(dtype=torch.float32)
+        same_tx = (tx[:, None] == tx[None, :]).to(dtype=torch.float32)
+        return torch.stack((drx, dtx, torch.abs(drx), torch.abs(dtx), same_rx, same_tx), dim=-1)
+
+    def forward(self, h_pilot: torch.Tensor, pos_features: torch.Tensor) -> torch.Tensor:
+        batch, num_pilots = h_pilot.shape[:2]
+        links = h_pilot.reshape(batch, num_pilots, self.n_links)
+        magnitude = torch.abs(links).clamp_min(1e-8)
+        value_features = torch.stack(
+            (
+                links.real,
+                links.imag,
+                magnitude,
+                links.imag / magnitude,
+                links.real / magnitude,
+            ),
+            dim=-1,
+        ).to(dtype=pos_features.dtype)
+        pos = pos_features.unsqueeze(0).unsqueeze(2).expand(batch, num_pilots, self.n_links, -1)
+        link_tokens = self.value_projection(torch.cat((value_features, pos), dim=-1))
+
+        rx_embed = self.rx_embedding(self.link_rx_ids.to(device=h_pilot.device))
+        tx_embed = self.tx_embedding(self.link_tx_ids.to(device=h_pilot.device))
+        link_tokens = link_tokens + (rx_embed + tx_embed).view(1, 1, self.n_links, self.hidden_channels)
+
+        link_tokens = link_tokens.reshape(batch * num_pilots, self.n_links, self.hidden_channels)
+        pair_features = self.link_pair_features.to(device=h_pilot.device, dtype=link_tokens.dtype)
+        for layer in self.link_layers:
+            link_tokens = layer(link_tokens, pair_features)
+
+        pool_logits = self.link_pool(link_tokens).squeeze(-1)
+        pool = torch.softmax(pool_logits, dim=-1)
+        pilot_tokens = torch.sum(link_tokens * pool.unsqueeze(-1), dim=1)
+        pilot_tokens = pilot_tokens.reshape(batch, num_pilots, self.hidden_channels)
+        return self.out_norm(pilot_tokens)
+
+    def attention_entropies(self) -> list[torch.Tensor]:
+        entropies: list[torch.Tensor] = []
+        for layer in self.link_layers:
+            if layer.last_attention_entropy is not None:
+                entropies.append(layer.last_attention_entropy)
+        return entropies
+
+
 class PilotFittedMIMOSharedBasisNet(nn.Module):
     """Pilot-fitted MIMO shared-basis estimator.
 
@@ -367,6 +532,10 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         use_attention: bool = False,
         attention_heads: int = 4,
         attention_layers: int = 1,
+        token_encoder: str = "flat",
+        link_attention_heads: int | None = None,
+        link_attention_layers: int = 1,
+        link_attention_dropout: float | None = None,
         use_learned_pilot_weights: bool = True,
         use_learned_regularization: bool = True,
         use_basis_gate: bool = True,
@@ -393,6 +562,12 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
         self.use_attention = bool(use_attention)
         self.attention_heads = int(attention_heads)
         self.num_attention_layers = int(attention_layers)
+        self.token_encoder_type = token_encoder.lower().replace("-", "_")
+        if self.token_encoder_type not in {"flat", "mimo_tokenformer"}:
+            raise ValueError("token_encoder must be 'flat' or 'mimo_tokenformer'.")
+        self.link_attention_heads = int(link_attention_heads or attention_heads)
+        self.link_attention_layers = int(link_attention_layers)
+        self.link_attention_dropout = float(attention_dropout if link_attention_dropout is None else link_attention_dropout)
         self.use_learned_pilot_weights = bool(use_learned_pilot_weights)
         self.use_learned_regularization = bool(use_learned_regularization)
         self.use_basis_gate = bool(use_basis_gate)
@@ -410,12 +585,23 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
 
         pos_dim = int(self.pilot_position_features.shape[1])
         token_dim = 2 * self.n_links + pos_dim
-        self.token_mlp = nn.Sequential(
-            nn.Linear(token_dim, hidden_channels),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(inplace=True),
-        )
+        if self.token_encoder_type == "flat":
+            self.token_mlp = nn.Sequential(
+                nn.Linear(token_dim, hidden_channels),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_channels, hidden_channels),
+                nn.ReLU(inplace=True),
+            )
+        else:
+            self.mimo_token_encoder = MIMOStructuredPilotTokenFormerEncoder(
+                n_rx=self.n_rx,
+                n_tx=self.n_tx,
+                pos_dim=pos_dim,
+                hidden_channels=hidden_channels,
+                num_heads=self.link_attention_heads,
+                num_layers=self.link_attention_layers,
+                dropout=self.link_attention_dropout,
+            )
         self.weight_head = nn.Linear(hidden_channels, 1)
         if self.use_attention:
             relative_dim = int(self.relative_position_features.shape[-1])
@@ -530,10 +716,14 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
             noise_scale = torch.as_tensor(self.pilot_noise_std, device=h_pilot.device, dtype=links.real.dtype)
             noise = torch.randn_like(links.real) * noise_scale
             links = torch.complex(links.real + noise, links.imag + torch.randn_like(links.imag) * noise_scale)
-        value_features = torch.cat((links.real, links.imag), dim=-1).to(dtype=self.basis.dtype)
         pos_features = self.pilot_position_features.to(device=h_pilot.device, dtype=self.basis.dtype)
-        pos_features = pos_features.unsqueeze(0).expand(batch, -1, -1)
-        tokens = self.token_mlp(torch.cat((value_features, pos_features), dim=-1))
+        if self.token_encoder_type == "flat":
+            value_features = torch.cat((links.real, links.imag), dim=-1).to(dtype=self.basis.dtype)
+            expanded_pos = pos_features.unsqueeze(0).expand(batch, -1, -1)
+            tokens = self.token_mlp(torch.cat((value_features, expanded_pos), dim=-1))
+        else:
+            h_for_encoder = links.reshape(batch, num_pilots, self.n_rx, self.n_tx)
+            tokens = self.mimo_token_encoder(h_for_encoder, pos_features)
         if self.use_attention:
             relative_features = self.relative_position_features.to(device=h_pilot.device, dtype=self.basis.dtype)
             for layer in self.attention_encoder:
@@ -615,6 +805,8 @@ class PilotFittedMIMOSharedBasisNet(nn.Module):
 
     def attention_entropy_loss(self) -> torch.Tensor:
         entropies: list[torch.Tensor] = []
+        if self.token_encoder_type == "mimo_tokenformer":
+            entropies.extend(self.mimo_token_encoder.attention_entropies())
         if self.use_attention:
             for layer in self.attention_encoder:
                 if layer.last_attention_entropy is not None:
