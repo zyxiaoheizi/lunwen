@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -46,8 +46,8 @@ class PilotFittedGridDataset(Dataset):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PF-MSBNet on raw pilot observations.")
-    parser.add_argument("--train", type=Path, required=True)
-    parser.add_argument("--val", type=Path, required=True)
+    parser.add_argument("--train", type=Path, nargs="+", required=True)
+    parser.add_argument("--val", type=Path, nargs="+", required=True)
     parser.add_argument("--test", type=Path, nargs="*", default=[])
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -104,11 +104,36 @@ def serializable_args(args: argparse.Namespace) -> dict[str, object]:
     return clean
 
 
-def compute_scale(path: Path, target_key: str) -> float:
-    data = np.load(path)
-    target = data[target_key].astype(np.float32)
-    scale = float(np.sqrt(np.mean(target**2)))
+def paths_list(paths: list[Path] | Path) -> list[Path]:
+    return paths if isinstance(paths, list) else [paths]
+
+
+def compute_scale(paths: list[Path] | Path, target_key: str) -> float:
+    total_square = 0.0
+    total_count = 0
+    for path in paths_list(paths):
+        data = np.load(path)
+        target = data[target_key].astype(np.float32)
+        total_square += float(np.sum(target**2, dtype=np.float64))
+        total_count += int(target.size)
+    scale = float(np.sqrt(total_square / max(total_count, 1)))
     return max(scale, 1e-8)
+
+
+def build_pilot_dataset(
+    paths: list[Path] | Path,
+    scale: float,
+    pilot_key: str,
+    target_key: str,
+) -> tuple[Dataset, PilotFittedGridDataset]:
+    datasets = [PilotFittedGridDataset(path, scale, pilot_key, target_key) for path in paths_list(paths)]
+    reference = datasets[0]
+    for dataset in datasets[1:]:
+        if not np.array_equal(reference.pilot_positions, dataset.pilot_positions):
+            raise ValueError(f"pilot_positions differ between {reference.path} and {dataset.path}.")
+    if len(datasets) == 1:
+        return reference, reference
+    return ConcatDataset(datasets), reference
 
 
 def nmse_linear(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -148,25 +173,38 @@ def gate_entropy_loss(gate: torch.Tensor) -> torch.Tensor:
 
 
 def pca_basis_from_training_file(
-    path: Path,
+    paths: list[Path] | Path,
     scale: float,
     num_basis: int,
     max_observations: int,
     seed: int,
 ) -> torch.Tensor:
-    data = np.load(path)
-    h_grid = data["h_true_grid"].astype(np.complex64)
-    n_samples, n_symbols, n_subcarriers, n_rx, n_tx = h_grid.shape
-    observations = np.transpose(h_grid, (0, 3, 4, 1, 2)).reshape(-1, n_symbols * n_subcarriers)
-    observations = observations / np.float32(scale)
+    train_paths = paths_list(paths)
+    rng = np.random.default_rng(seed)
+    per_file_limit = max(num_basis, int(np.ceil(max_observations / max(len(train_paths), 1))))
+    chunks: list[np.ndarray] = []
+    n_symbols = n_subcarriers = 0
+    for path in train_paths:
+        data = np.load(path)
+        h_grid = data["h_true_grid"].astype(np.complex64)
+        n_samples, n_symbols, n_subcarriers, n_rx, n_tx = h_grid.shape
+        observations = np.transpose(h_grid, (0, 3, 4, 1, 2)).reshape(-1, n_symbols * n_subcarriers)
+        observations = observations / np.float32(scale)
+        if observations.shape[0] > per_file_limit:
+            indices = rng.choice(observations.shape[0], size=per_file_limit, replace=False)
+            observations = observations[indices]
+        chunks.append(observations)
+    observations = np.concatenate(chunks, axis=0)
     if observations.shape[0] > max_observations:
-        rng = np.random.default_rng(seed)
         indices = rng.choice(observations.shape[0], size=max_observations, replace=False)
         observations = observations[indices]
     if observations.shape[0] < num_basis:
         raise ValueError("pca-max-observations must be at least num_basis.")
 
-    print(f"initializing basis with PCA: observations={observations.shape[0]}, grid={n_symbols}x{n_subcarriers}")
+    print(
+        f"initializing basis with PCA: files={len(train_paths)}, "
+        f"observations={observations.shape[0]}, grid={n_symbols}x{n_subcarriers}"
+    )
     _, _, vh = np.linalg.svd(observations, full_matrices=False)
     basis = vh[:num_basis].reshape(num_basis, n_symbols, n_subcarriers).astype(np.complex64)
     return torch.from_numpy(basis)
@@ -212,16 +250,16 @@ def main() -> None:
     device = torch.device(args.device)
     scale = 1.0 if args.no_normalize else compute_scale(args.train, args.target_key)
 
-    train_set = PilotFittedGridDataset(args.train, scale, args.pilot_key, args.target_key)
-    val_set = PilotFittedGridDataset(args.val, scale, args.pilot_key, args.target_key)
-    if not np.array_equal(train_set.pilot_positions, val_set.pilot_positions):
+    train_set, train_meta = build_pilot_dataset(args.train, scale, args.pilot_key, args.target_key)
+    val_set, val_meta = build_pilot_dataset(args.val, scale, args.pilot_key, args.target_key)
+    if not np.array_equal(train_meta.pilot_positions, val_meta.pilot_positions):
         raise ValueError("train and val pilot_positions differ; this first PF-MSBNet version expects fixed pilots.")
 
-    n_rx = int(train_set.h_pilot.shape[2])
-    n_tx = int(train_set.h_pilot.shape[3])
-    n_symbols = int(train_set.target.shape[2])
-    n_subcarriers = int(train_set.target.shape[3])
-    pilot_positions = torch.from_numpy(train_set.pilot_positions)
+    n_rx = int(train_meta.h_pilot.shape[2])
+    n_tx = int(train_meta.h_pilot.shape[3])
+    n_symbols = int(train_meta.target.shape[2])
+    n_subcarriers = int(train_meta.target.shape[3])
+    pilot_positions = torch.from_numpy(train_meta.pilot_positions)
 
     model = PilotFittedMIMOSharedBasisNet(
         pilot_positions=pilot_positions,
@@ -489,7 +527,7 @@ def main() -> None:
     test_results: dict[str, dict[str, float]] = {}
     for test_path in args.test:
         test_set = PilotFittedGridDataset(test_path, scale, args.pilot_key, args.target_key)
-        if not np.array_equal(train_set.pilot_positions, test_set.pilot_positions):
+        if not np.array_equal(train_meta.pilot_positions, test_set.pilot_positions):
             raise ValueError(f"test pilot_positions differ: {test_path}")
         test_loader = DataLoader(
             test_set,
