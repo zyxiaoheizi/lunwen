@@ -163,7 +163,9 @@ def compact_legend(ax, *, ncol: int = 2) -> None:
         fancybox=False,
         framealpha=0.94,
         edgecolor="#555555",
-        loc="upper right",
+        loc="lower right",
+        bbox_to_anchor=(1.0, 1.012),
+        borderaxespad=0.0,
         borderpad=0.22,
         columnspacing=0.52,
         handlelength=1.05,
@@ -204,6 +206,12 @@ def ordered_labels(labels: set[str]) -> list[str]:
     ordered = [label for label in METHOD_ORDER if label in labels]
     ordered.extend(sorted(label for label in labels if label not in ordered))
     return ordered
+
+
+def warn_missing(context: str, expected: set[str], observed: set[str]) -> None:
+    missing = [label for label in METHOD_ORDER if label in expected and label not in observed]
+    if missing:
+        print(f"warning: {context} missing methods: {', '.join(missing)}")
 
 
 def normalize_rows(rows: list[dict[str, str]], keep: set[str] | None = None) -> list[dict[str, object]]:
@@ -262,7 +270,9 @@ def plot_snr_curve(csv_path: Path, outdir: Path, keep: set[str]) -> None:
     if not parsed:
         return
 
-    labels = ordered_labels({str(row["method"]) for row in parsed})
+    observed = {str(row["method"]) for row in parsed}
+    warn_missing("SNR-NMSE curve", keep, observed)
+    labels = ordered_labels(observed)
     plt.figure(figsize=(3.35, 2.12))
     ax = plt.gca()
     for label in labels:
@@ -301,7 +311,9 @@ def plot_ber_curve(csv_path: Path, outdir: Path, keep: set[str]) -> None:
     if not parsed:
         return
 
-    labels = ordered_labels({str(row["method"]) for row in parsed})
+    observed = {str(row["method"]) for row in parsed}
+    warn_missing("SNR-BER curve", keep, observed)
+    labels = ordered_labels(observed)
     plt.figure(figsize=(3.35, 2.12))
     ax = plt.gca()
     for label in labels:
@@ -359,7 +371,15 @@ def plot_pilot_overhead(csv_paths: list[Path], outdir: Path, keep: set[str]) -> 
             summary.append({"pilots": pilot, "method": method, "mean_nmse_db": float(np.mean(values))})
     if not summary:
         return
-    labels = ordered_labels({str(row["method"]) for row in summary})
+    observed = {str(row["method"]) for row in summary}
+    warn_missing("pilot-overhead curve", keep, observed)
+    pilots = sorted({int(row["pilots"]) for row in summary})
+    for label in ordered_labels(observed):
+        present = {int(row["pilots"]) for row in summary if row["method"] == label}
+        missing_pilots = [str(pilot) for pilot in pilots if pilot not in present]
+        if missing_pilots:
+            print(f"warning: pilot-overhead curve missing {label} at pilots: {', '.join(missing_pilots)}")
+    labels = ordered_labels(observed)
     plt.figure(figsize=(3.35, 2.05))
     ax = plt.gca()
     for label in labels:
@@ -369,7 +389,7 @@ def plot_pilot_overhead(csv_paths: list[Path], outdir: Path, keep: set[str]) -> 
         draw_method_curve(ax, x, y, label)
     ax.set_xlabel("Number of pilots")
     ax.set_ylabel("Average NMSE (dB)")
-    ax.set_xticks(sorted({int(row["pilots"]) for row in summary}))
+    ax.set_xticks(pilots)
     ax.grid(True, linestyle="--", alpha=0.30)
     compact_legend(ax, ncol=2)
     write_csv(outdir / "letter_pilot_overhead_nmse.csv", summary)
@@ -541,7 +561,7 @@ def write_complexity_table(
         time_text = f"{time_value:.4f}" if time_value is not None and np.isfinite(time_value) else "-"
         table_rows.append([method, params_text, time_text])
 
-    write_latex_table(outdir / "letter_complexity_table.tex", ["Method", "Params", "Time"], table_rows)
+    write_latex_table(outdir / "letter_complexity_table.tex", ["Method", "Params", "Time (ms/frame)"], table_rows)
 
 
 def parse_args() -> argparse.Namespace:
