@@ -7,7 +7,7 @@ PILOT_TAG="p${PILOTS}"
 OUT_ROOT="${OUT_ROOT:-outputs/${PILOT_TAG}}"
 TRAIN_SAMPLES="${TRAIN_SAMPLES:-32000}"
 TEST_SAMPLES="${TEST_SAMPLES:-4000}"
-SNR_LIST="${SNR_LIST:-0 5 10 15 20 25 30}"
+SNR_LIST="${SNR_LIST:-0 2 4 6 8 10 12 14 16 18 20 22 24 26 28 30}"
 PROFILE="${PROFILE:-tdl-a}"
 DEVICE="${DEVICE:-cuda}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
@@ -15,6 +15,8 @@ LMMSE_PROFILE="${LMMSE_PROFILE:-tdl-a}"
 LMMSE_DELAY_SPREAD_NS="${LMMSE_DELAY_SPREAD_NS:-300}"
 INCLUDE_PAPER_LMMSE="${INCLUDE_PAPER_LMMSE:-1}"
 INCLUDE_EMPIRICAL_LMMSE="${INCLUDE_EMPIRICAL_LMMSE:-0}"
+INCLUDE_ORACLE_LMMSE="${INCLUDE_ORACLE_LMMSE:-0}"
+INCLUDE_MISMATCHED_LMMSE="${INCLUDE_MISMATCHED_LMMSE:-0}"
 INCLUDE_DELAY_BEM="${INCLUDE_DELAY_BEM:-0}"
 INCLUDE_ORACLE_DELAY_BEM="${INCLUDE_ORACLE_DELAY_BEM:-0}"
 INCLUDE_SPARSE_DELAY_BEM="${INCLUDE_SPARSE_DELAY_BEM:-0}"
@@ -65,11 +67,15 @@ if [[ "${INCLUDE_A2}" == "1" && -f "${OUT_ROOT}/pf_msbnet_a2/pf_msbnet_grid_best
 fi
 
 LMMSE_ARGS=(
-  --include-oracle-lmmse
-  --include-mismatched-lmmse
   --lmmse-profile "${LMMSE_PROFILE}"
   --lmmse-delay-spread-ns "${LMMSE_DELAY_SPREAD_NS}"
 )
+if [[ "${INCLUDE_ORACLE_LMMSE}" == "1" ]]; then
+  LMMSE_ARGS+=(--include-oracle-lmmse)
+fi
+if [[ "${INCLUDE_MISMATCHED_LMMSE}" == "1" ]]; then
+  LMMSE_ARGS+=(--include-mismatched-lmmse)
+fi
 if [[ -f "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz" ]]; then
   if [[ "${INCLUDE_PAPER_LMMSE}" == "1" ]]; then
     LMMSE_ARGS+=(
