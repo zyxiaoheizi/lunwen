@@ -72,14 +72,14 @@ def line_alpha(label: str) -> float:
 
 def line_width(label: str) -> float:
     if label == "Proposed":
-        return 0.95
-    if label in {"Ideal LMMSE", "Full LMMSE", "ALMMSE"}:
         return 0.82
-    return 0.78
+    if label in {"Ideal LMMSE", "Full LMMSE", "ALMMSE"}:
+        return 0.72
+    return 0.68
 
 
 def marker_size(label: str) -> float:
-    return 2.25 if label == "Proposed" else 1.9
+    return 1.85 if label == "Proposed" else 1.55
 
 
 def draw_method_curve(ax, x, y, label: str, *, semilogy: bool = False) -> None:
@@ -95,7 +95,7 @@ def draw_method_curve(ax, x, y, label: str, *, semilogy: bool = False) -> None:
         alpha=line_alpha(label),
         markerfacecolor=marker_face(label),
         markeredgecolor=COLORS.get(label),
-        markeredgewidth=0.38,
+        markeredgewidth=0.30,
         label=label,
         zorder=5 if label == "Proposed" else 4 if label in {"Ideal LMMSE", "Full LMMSE", "ALMMSE"} else 3,
     )
@@ -294,7 +294,8 @@ def plot_ber_curve(csv_path: Path, outdir: Path, keep: set[str]) -> None:
             {
                 "snr_db": snr,
                 "method": label,
-                "ber": max(float(row["ber"]), 1e-7),
+                "ber": max(float(row["ber"]), 1e-9),
+                "ber_db": float(row["ber_db"]) if row.get("ber_db") not in (None, "") else 10.0 * np.log10(max(float(row["ber"]), 1e-9)),
             }
         )
     if not parsed:
@@ -306,11 +307,11 @@ def plot_ber_curve(csv_path: Path, outdir: Path, keep: set[str]) -> None:
     for label in labels:
         curve = sorted((row for row in parsed if row["method"] == label), key=lambda item: float(item["snr_db"]))
         x = [float(row["snr_db"]) for row in curve]
-        y = [float(row["ber"]) for row in curve]
-        draw_method_curve(ax, x, y, label, semilogy=True)
+        y = [float(row["ber_db"]) for row in curve]
+        draw_method_curve(ax, x, y, label)
     ax.set_xlabel("SNR (dB)")
-    ax.set_ylabel("BER")
-    ax.grid(True, which="both", linestyle="--", alpha=0.30)
+    ax.set_ylabel("BER (dB)")
+    ax.grid(True, linestyle="--", alpha=0.30)
     compact_legend(ax, ncol=2)
     write_csv(outdir / "letter_snr_ber.csv", parsed)
     save_figure(outdir / "letter_snr_ber")

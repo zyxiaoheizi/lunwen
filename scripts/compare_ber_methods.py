@@ -198,25 +198,28 @@ def plot_ber(path: Path, rows: list[dict[str, object]]) -> None:
     for method in methods:
         curve = sorted((row for row in rows if row["method"] == method), key=lambda item: float(item["snr_db"]))
         x = [float(row["snr_db"]) for row in curve]
-        y = [max(float(row["ber"]), 1e-6) for row in curve]
-        ax.semilogy(
+        y = [
+            float(row["ber_db"]) if row.get("ber_db") not in (None, "") else 10.0 * np.log10(max(float(row["ber"]), 1e-9))
+            for row in curve
+        ]
+        ax.plot(
             x,
             y,
             marker=MARKERS.get(method, "o"),
-            markersize=2.25 if method == "Proposed" else 1.9,
+            markersize=1.85 if method == "Proposed" else 1.55,
             color=COLORS.get(method),
             linestyle=LINESTYLES.get(method, "-"),
-            linewidth=0.95 if method == "Proposed" else 0.82 if method in {"Ideal LMMSE", "ALMMSE"} else 0.78,
+            linewidth=0.82 if method == "Proposed" else 0.72 if method in {"Ideal LMMSE", "ALMMSE"} else 0.68,
             alpha=1.0 if method in {"Proposed", "Ideal LMMSE", "ALMMSE"} else 0.88,
             markerfacecolor="white" if method in HOLLOW_MARKERS else COLORS.get(method),
             markeredgecolor=COLORS.get(method),
-            markeredgewidth=0.38,
+            markeredgewidth=0.30,
             label=method,
             zorder=5 if method == "Proposed" else 4 if method in {"Ideal LMMSE", "ALMMSE"} else 3,
         )
     ax.set_xlabel("SNR (dB)")
-    ax.set_ylabel("BER")
-    ax.grid(True, which="both", linestyle="--", alpha=0.30)
+    ax.set_ylabel("BER (dB)")
+    ax.grid(True, linestyle="--", alpha=0.30)
     legend = ax.legend(
         ncol=2,
         frameon=True,
@@ -361,13 +364,14 @@ def main() -> None:
                 "snr_db": snr,
                 "method": method,
                 "ber": ber,
+                "ber_db": 10.0 * np.log10(max(ber, 1e-9)),
                 "bit_errors": errors,
                 "total_bits": total,
                 "params": params,
                 "checkpoint": checkpoint,
             }
             rows.append(row)
-            print(f"{dataset} | {method}: BER={ber:.4e} ({errors}/{total})")
+            print(f"{dataset} | {method}: BER={ber:.4e}, {row['ber_db']:.3f} dB ({errors}/{total})")
 
     csv_path = args.outdir / "ber_curve.csv"
     json_path = args.outdir / "ber_curve.json"
