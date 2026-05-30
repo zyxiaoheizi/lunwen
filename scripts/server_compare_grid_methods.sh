@@ -12,6 +12,9 @@ BATCH_SIZE="${BATCH_SIZE:-256}"
 LMMSE_PROFILE="${LMMSE_PROFILE:-tdl-a}"
 LMMSE_DELAY_SPREAD_NS="${LMMSE_DELAY_SPREAD_NS:-300}"
 INCLUDE_PAPER_LMMSE="${INCLUDE_PAPER_LMMSE:-1}"
+INCLUDE_ALMMSE="${INCLUDE_ALMMSE:-1}"
+ALMMSE_TIME_RANK="${ALMMSE_TIME_RANK:-2}"
+ALMMSE_FREQ_RANK="${ALMMSE_FREQ_RANK:-4}"
 INCLUDE_EMPIRICAL_LMMSE="${INCLUDE_EMPIRICAL_LMMSE:-0}"
 INCLUDE_ORACLE_LMMSE="${INCLUDE_ORACLE_LMMSE:-0}"
 INCLUDE_MISMATCHED_LMMSE="${INCLUDE_MISMATCHED_LMMSE:-0}"
@@ -85,6 +88,14 @@ if [[ -f "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz" ]]; then
     LMMSE_ARGS+=(
       --include-paper-lmmse
       --paper-lmmse-train "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz"
+    )
+  fi
+  if [[ "${INCLUDE_ALMMSE}" == "1" ]]; then
+    LMMSE_ARGS+=(
+      --include-almmse
+      --almmse-train "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz"
+      --almmse-time-rank "${ALMMSE_TIME_RANK}"
+      --almmse-freq-rank "${ALMMSE_FREQ_RANK}"
     )
   fi
   if [[ "${INCLUDE_EMPIRICAL_LMMSE}" == "1" ]]; then

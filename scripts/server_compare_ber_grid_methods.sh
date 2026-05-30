@@ -13,6 +13,9 @@ DEVICE="${DEVICE:-cuda}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 BER_BATCH_FRAMES="${BER_BATCH_FRAMES:-128}"
 INCLUDE_PAPER_LMMSE="${INCLUDE_PAPER_LMMSE:-1}"
+INCLUDE_ALMMSE="${INCLUDE_ALMMSE:-1}"
+ALMMSE_TIME_RANK="${ALMMSE_TIME_RANK:-2}"
+ALMMSE_FREQ_RANK="${ALMMSE_FREQ_RANK:-4}"
 INCLUDE_CHANNELNET="${INCLUDE_CHANNELNET:-1}"
 INCLUDE_REESNET="${INCLUDE_REESNET:-1}"
 INCLUDE_PROPOSED="${INCLUDE_PROPOSED:-1}"
@@ -43,6 +46,14 @@ if [[ "${INCLUDE_PAPER_LMMSE}" == "1" && -f "data/grid/grid_${PILOT_TAG}_tdl_a_t
   LMMSE_ARGS+=(
     --include-paper-lmmse
     --paper-lmmse-train "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz"
+  )
+fi
+if [[ "${INCLUDE_ALMMSE}" == "1" && -f "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz" ]]; then
+  LMMSE_ARGS+=(
+    --include-almmse
+    --almmse-train "data/grid/grid_${PILOT_TAG}_tdl_a_train_${TRAIN_SAMPLES}.npz"
+    --almmse-time-rank "${ALMMSE_TIME_RANK}"
+    --almmse-freq-rank "${ALMMSE_FREQ_RANK}"
   )
 fi
 

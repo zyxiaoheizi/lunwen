@@ -388,6 +388,111 @@ def empirical_lmmse_grid_estimate(
     return lmmse_grid_estimate_from_covariance(data, cov, mean)
 
 
+def estimate_separable_lmmse_statistics(
+    train_path: Path,
+    key: str = "h_true_grid",
+    time_rank: int = 2,
+    freq_rank: int = 4,
+    batch_frames: int = 512,
+    center: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    r"""Estimate a practical low-rank separable LMMSE prior from training data.
+
+    Full 2D LMMSE needs a large covariance matrix over the whole time-frequency
+    grid. The ALMMSE-style approximation here assumes a Kronecker structure,
+    R_h ~= R_t \otimes R_f, and keeps only the strongest temporal/frequency
+    eigenmodes. It is intentionally a practical approximation, not an oracle
+    full-covariance bound.
+    """
+
+    with np.load(train_path) as train_data:
+        h_grid = train_data[key]
+        n_samples, n_symbols, n_subcarriers, n_rx, n_tx = h_grid.shape
+        grid_size = n_symbols * n_subcarriers
+        n_links = n_rx * n_tx
+        n_observations = n_samples * n_links
+        mean_grid = np.zeros((n_symbols, n_subcarriers), dtype=np.complex128)
+
+        if center:
+            for start in range(0, n_samples, batch_frames):
+                chunk = h_grid[start : start + batch_frames].astype(np.complex128)
+                links = np.transpose(chunk, (0, 3, 4, 1, 2)).reshape(-1, n_symbols, n_subcarriers)
+                mean_grid += np.sum(links, axis=0)
+            mean_grid /= float(n_observations)
+
+        time_cov = np.zeros((n_symbols, n_symbols), dtype=np.complex128)
+        freq_cov = np.zeros((n_subcarriers, n_subcarriers), dtype=np.complex128)
+        power_sum = 0.0
+        for start in range(0, n_samples, batch_frames):
+            chunk = h_grid[start : start + batch_frames].astype(np.complex128)
+            links = np.transpose(chunk, (0, 3, 4, 1, 2)).reshape(-1, n_symbols, n_subcarriers)
+            samples = links - mean_grid[None, :, :] if center else links
+            time_cov += np.einsum("btf,bsf->ts", samples, samples.conj())
+            freq_cov += np.einsum("btf,btg->fg", samples, samples.conj())
+            power_sum += float(np.sum(np.abs(samples) ** 2))
+
+        time_cov /= float(max(n_observations * n_subcarriers, 1))
+        freq_cov /= float(max(n_observations * n_symbols, 1))
+        average_power = power_sum / float(max(n_observations * grid_size, 1))
+
+    time_eval, time_evec = np.linalg.eigh((time_cov + time_cov.conj().T) / 2.0)
+    freq_eval, freq_evec = np.linalg.eigh((freq_cov + freq_cov.conj().T) / 2.0)
+    time_order = np.argsort(time_eval)[::-1][: max(1, min(int(time_rank), n_symbols))]
+    freq_order = np.argsort(freq_eval)[::-1][: max(1, min(int(freq_rank), n_subcarriers))]
+    time_eval = np.maximum(time_eval[time_order].real, 0.0)
+    freq_eval = np.maximum(freq_eval[freq_order].real, 0.0)
+    time_evec = time_evec[:, time_order]
+    freq_evec = freq_evec[:, freq_order]
+
+    basis_columns = []
+    eigvals = []
+    for t_idx in range(time_evec.shape[1]):
+        for f_idx in range(freq_evec.shape[1]):
+            basis_columns.append(np.kron(time_evec[:, t_idx], freq_evec[:, f_idx]))
+            eigvals.append(time_eval[t_idx] * freq_eval[f_idx])
+    basis = np.stack(basis_columns, axis=1).astype(np.complex128)
+    eigvals_array = np.asarray(eigvals, dtype=np.float64)
+
+    # Match the total variance retained by the separable model to the measured
+    # average channel power before truncation. This keeps the approximation from
+    # becoming overly optimistic or overly damped due to separability scaling.
+    full_trace = float(np.trace(time_cov).real * np.trace(freq_cov).real)
+    target_trace = float(average_power * grid_size)
+    if full_trace > 1e-12:
+        eigvals_array *= target_trace / full_trace
+    eigvals_array = np.maximum(eigvals_array, 1e-12)
+    return mean_grid.reshape(grid_size), basis, eigvals_array
+
+
+def low_rank_lmmse_grid_estimate(
+    data: np.lib.npyio.NpzFile,
+    mean: np.ndarray,
+    basis: np.ndarray,
+    eigvals: np.ndarray,
+) -> np.ndarray:
+    h_pilot_ls = data["h_pilot_ls"].astype(np.complex128)
+    positions = data["pilot_positions"].astype(np.int64)
+    noise_var = data["noise_var"].astype(np.float64)
+    n_symbols = int(data["n_symbols"])
+    n_subcarriers = int(data["n_subcarriers"])
+    grid_size = n_symbols * n_subcarriers
+    pilot_flat = positions[:, 0] * n_subcarriers + positions[:, 1]
+    pilot_basis = basis[pilot_flat]
+    weighted_pilot = pilot_basis * eigvals.reshape(1, -1)
+    r_pp = weighted_pilot @ pilot_basis.conj().T
+    eye = np.eye(len(pilot_flat), dtype=np.complex128)
+    mean_grid = mean.astype(np.complex128).reshape(grid_size)
+    mean_pilot = mean_grid[pilot_flat]
+
+    estimates = np.empty((h_pilot_ls.shape[0], grid_size, h_pilot_ls.shape[2], h_pilot_ls.shape[3]), dtype=np.complex64)
+    for idx in range(h_pilot_ls.shape[0]):
+        rhs = h_pilot_ls[idx].reshape(len(pilot_flat), -1) - mean_pilot[:, None]
+        coeff = np.linalg.solve(r_pp + noise_var[idx] * eye, rhs)
+        latent = weighted_pilot.conj().T @ coeff
+        estimates[idx] = (mean_grid[:, None] + basis @ latent).reshape(grid_size, h_pilot_ls.shape[2], h_pilot_ls.shape[3])
+    return estimates.reshape(h_pilot_ls.shape[0], n_symbols, n_subcarriers, h_pilot_ls.shape[2], h_pilot_ls.shape[3])
+
+
 @torch.no_grad()
 def torch_nmse(
     model: torch.nn.Module,
@@ -592,6 +697,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-lmmse-train", type=Path, default=None)
     parser.add_argument("--paper-lmmse-key", default="h_true_grid")
     parser.add_argument("--paper-lmmse-batch-frames", type=int, default=512)
+    parser.add_argument("--include-almmse", action="store_true")
+    parser.add_argument("--almmse-train", type=Path, default=None)
+    parser.add_argument("--almmse-key", default="h_true_grid")
+    parser.add_argument("--almmse-batch-frames", type=int, default=512)
+    parser.add_argument("--almmse-time-rank", type=int, default=2)
+    parser.add_argument("--almmse-freq-rank", type=int, default=4)
     parser.add_argument("--include-oracle-lmmse", action="store_true")
     parser.add_argument("--include-mismatched-lmmse", action="store_true")
     parser.add_argument("--lmmse-profile", default="tdl-a")
@@ -625,6 +736,24 @@ def main() -> None:
             key=args.paper_lmmse_key,
             batch_frames=args.paper_lmmse_batch_frames,
             center=False,
+        )
+
+    almmse_stats: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+    if args.include_almmse or args.almmse_train is not None:
+        almmse_train_path = args.almmse_train or args.paper_lmmse_train or args.empirical_lmmse_train
+        if almmse_train_path is None:
+            raise ValueError("--include-almmse requires --almmse-train")
+        print(
+            "estimating ALMMSE low-rank separable prior from: "
+            f"{almmse_train_path} (time_rank={args.almmse_time_rank}, freq_rank={args.almmse_freq_rank})"
+        )
+        almmse_stats = estimate_separable_lmmse_statistics(
+            train_path=almmse_train_path,
+            key=args.almmse_key,
+            time_rank=args.almmse_time_rank,
+            freq_rank=args.almmse_freq_rank,
+            batch_frames=args.almmse_batch_frames,
+            center=True,
         )
 
     empirical_stats: tuple[np.ndarray, np.ndarray] | None = None
@@ -683,6 +812,26 @@ def main() -> None:
                 }
             )
             print(f"{dataset_name} | Paper LMMSE (sample covariance): {paper_nmse_db:.3f} dB")
+
+        if almmse_stats is not None:
+            almmse_mean, almmse_basis, almmse_eigvals = almmse_stats
+            h_almmse = low_rank_lmmse_grid_estimate(data, almmse_mean, almmse_basis, almmse_eigvals)
+            almmse_ri = complex_grid_to_ri(h_almmse)
+            almmse_nmse, almmse_nmse_db = np_nmse(almmse_ri, y)
+            rows.append(
+                {
+                    "dataset": dataset_name,
+                    "method": "ALMMSE",
+                    "nmse": almmse_nmse,
+                    "nmse_db": almmse_nmse_db,
+                    "params": 0,
+                    "checkpoint": str(args.almmse_train or args.paper_lmmse_train or args.empirical_lmmse_train),
+                }
+            )
+            print(
+                f"{dataset_name} | ALMMSE (rank {args.almmse_time_rank}x{args.almmse_freq_rank}): "
+                f"{almmse_nmse_db:.3f} dB"
+            )
 
         if empirical_stats is not None:
             empirical_mean, empirical_cov = empirical_stats

@@ -16,6 +16,7 @@ METHOD_LABELS = {
     "Paper LMMSE (sample covariance)": "LMMSE",
     "Empirical 2D LMMSE (train covariance)": "LMMSE",
     "Oracle 2D LMMSE": "Oracle LMMSE",
+    "ALMMSE": "ALMMSE",
     "ChannelNet": "ChannelNet",
     "ReEsNet": "ReEsNet",
     "PF-MSBNet": "PF-SBNet",
@@ -33,6 +34,7 @@ METHOD_LABELS = {
 METHOD_ORDER = [
     "LS",
     "LMMSE",
+    "ALMMSE",
     "Oracle LMMSE",
     "ChannelNet",
     "ReEsNet",
@@ -43,6 +45,7 @@ METHOD_ORDER = [
 COLORS = {
     "LS": "#7f7f7f",
     "LMMSE": "#1f77b4",
+    "ALMMSE": "#1f77b4",
     "Oracle LMMSE": "#1f77b4",
     "ChannelNet": "#ff7f0e",
     "ReEsNet": "#2ca02c",
@@ -62,13 +65,13 @@ def marker_face(label: str) -> str:
 
 
 def line_alpha(label: str) -> float:
-    return 1.0 if label in {"Proposed", "LMMSE"} else 0.92
+    return 1.0 if label in {"Proposed", "LMMSE", "ALMMSE"} else 0.92
 
 
 def line_width(label: str) -> float:
     if label == "Proposed":
         return 2.0
-    if label == "LMMSE":
+    if label in {"LMMSE", "ALMMSE"}:
         return 1.75
     return 1.45
 
@@ -92,7 +95,7 @@ def draw_method_curve(ax, x, y, label: str, *, semilogy: bool = False) -> None:
         markeredgecolor=COLORS.get(label),
         markeredgewidth=0.9,
         label=label,
-        zorder=5 if label == "Proposed" else 4 if label == "LMMSE" else 3,
+        zorder=5 if label == "Proposed" else 4 if label in {"LMMSE", "ALMMSE"} else 3,
     )
 
 
@@ -441,7 +444,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--main-methods",
         nargs="*",
-        default=["LS", "LMMSE", "ChannelNet", "ReEsNet", "Proposed"],
+        default=["LS", "ALMMSE", "ChannelNet", "ReEsNet", "Proposed"],
     )
     return parser.parse_args()
 

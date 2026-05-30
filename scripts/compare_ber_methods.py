@@ -19,8 +19,10 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from adapter_mimo_ofdm.models import PilotFittedMIMOSharedBasisNet  # noqa: E402
 from compare_grid_methods import (  # noqa: E402
     empirical_lmmse_grid_estimate,
+    estimate_separable_lmmse_statistics,
     estimate_empirical_grid_statistics,
     load_model_from_checkpoint,
+    low_rank_lmmse_grid_estimate,
     parse_model_spec,
 )
 
@@ -28,6 +30,7 @@ from compare_grid_methods import (  # noqa: E402
 METHOD_LABELS = {
     "LS + 2D interp.": "LS",
     "Paper LMMSE (sample covariance)": "LMMSE",
+    "ALMMSE": "ALMMSE",
     "ChannelNet": "ChannelNet",
     "ReEsNet": "ReEsNet",
     "PF-MSBNet-A tuned": "Proposed",
@@ -37,6 +40,7 @@ METHOD_LABELS = {
 COLORS = {
     "LS": "#7f7f7f",
     "LMMSE": "#1f77b4",
+    "ALMMSE": "#1f77b4",
     "ChannelNet": "#ff7f0e",
     "ReEsNet": "#2ca02c",
     "Proposed": "#d62728",
@@ -45,6 +49,7 @@ COLORS = {
 MARKERS = {
     "LS": "o",
     "LMMSE": "o",
+    "ALMMSE": "o",
     "ChannelNet": "o",
     "ReEsNet": "o",
     "Proposed": "o",
@@ -53,6 +58,7 @@ MARKERS = {
 LINESTYLES = {
     "LS": "-",
     "LMMSE": "-",
+    "ALMMSE": "-",
     "ChannelNet": "-",
     "ReEsNet": "-",
     "Proposed": "-",
@@ -197,13 +203,13 @@ def plot_ber(path: Path, rows: list[dict[str, object]]) -> None:
             markersize=4.8 if method == "Proposed" else 4.0,
             color=COLORS.get(method),
             linestyle=LINESTYLES.get(method, "-"),
-            linewidth=2.0 if method == "Proposed" else 1.75 if method == "LMMSE" else 1.45,
-            alpha=1.0 if method in {"Proposed", "LMMSE"} else 0.92,
+            linewidth=2.0 if method == "Proposed" else 1.75 if method in {"LMMSE", "ALMMSE"} else 1.45,
+            alpha=1.0 if method in {"Proposed", "LMMSE", "ALMMSE"} else 0.92,
             markerfacecolor="white" if method in HOLLOW_MARKERS else COLORS.get(method),
             markeredgecolor=COLORS.get(method),
             markeredgewidth=0.9,
             label=method,
-            zorder=5 if method == "Proposed" else 4 if method == "LMMSE" else 3,
+            zorder=5 if method == "Proposed" else 4 if method in {"LMMSE", "ALMMSE"} else 3,
         )
     ax.set_xlabel("SNR (dB)")
     ax.set_ylabel("BER")
@@ -229,6 +235,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-lmmse-train", type=Path, default=None)
     parser.add_argument("--paper-lmmse-key", default="h_true_grid")
     parser.add_argument("--paper-lmmse-batch-frames", type=int, default=512)
+    parser.add_argument("--include-almmse", action="store_true")
+    parser.add_argument("--almmse-train", type=Path, default=None)
+    parser.add_argument("--almmse-key", default="h_true_grid")
+    parser.add_argument("--almmse-batch-frames", type=int, default=512)
+    parser.add_argument("--almmse-time-rank", type=int, default=2)
+    parser.add_argument("--almmse-freq-rank", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20260530)
     parser.add_argument("--include-pilots", action="store_true")
     return parser.parse_args()
@@ -249,6 +261,23 @@ def main() -> None:
             key=args.paper_lmmse_key,
             batch_frames=args.paper_lmmse_batch_frames,
             center=False,
+        )
+
+    almmse_stats = None
+    if args.include_almmse:
+        if args.almmse_train is None:
+            raise ValueError("--include-almmse requires --almmse-train")
+        print(
+            "estimating ALMMSE low-rank separable prior from: "
+            f"{args.almmse_train} (time_rank={args.almmse_time_rank}, freq_rank={args.almmse_freq_rank})"
+        )
+        almmse_stats = estimate_separable_lmmse_statistics(
+            train_path=args.almmse_train,
+            key=args.almmse_key,
+            time_rank=args.almmse_time_rank,
+            freq_rank=args.almmse_freq_rank,
+            batch_frames=args.almmse_batch_frames,
+            center=True,
         )
 
     loaded_models = []
@@ -280,6 +309,16 @@ def main() -> None:
                     empirical_lmmse_grid_estimate(data, paper_mean, paper_cov),
                     0,
                     str(args.paper_lmmse_train),
+                )
+            )
+        if almmse_stats is not None:
+            almmse_mean, almmse_basis, almmse_eigvals = almmse_stats
+            estimates.append(
+                (
+                    "ALMMSE",
+                    low_rank_lmmse_grid_estimate(data, almmse_mean, almmse_basis, almmse_eigvals),
+                    0,
+                    str(args.almmse_train),
                 )
             )
         for display_name, model_name, model, scale, params, checkpoint_path in loaded_models:
