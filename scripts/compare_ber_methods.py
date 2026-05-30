@@ -29,7 +29,7 @@ from compare_grid_methods import (  # noqa: E402
 
 METHOD_LABELS = {
     "LS + 2D interp.": "LS",
-    "Paper LMMSE (sample covariance)": "LMMSE",
+    "Paper LMMSE (sample covariance)": "Ideal LMMSE",
     "ALMMSE": "ALMMSE",
     "ChannelNet": "ChannelNet",
     "ReEsNet": "ReEsNet",
@@ -39,8 +39,8 @@ METHOD_LABELS = {
 
 COLORS = {
     "LS": "#7f7f7f",
-    "LMMSE": "#1f77b4",
-    "ALMMSE": "#1f77b4",
+    "Ideal LMMSE": "#1f77b4",
+    "ALMMSE": "#4c78a8",
     "ChannelNet": "#ff7f0e",
     "ReEsNet": "#2ca02c",
     "Proposed": "#d62728",
@@ -48,7 +48,7 @@ COLORS = {
 
 MARKERS = {
     "LS": "o",
-    "LMMSE": "o",
+    "Ideal LMMSE": "o",
     "ALMMSE": "o",
     "ChannelNet": "o",
     "ReEsNet": "o",
@@ -57,14 +57,14 @@ MARKERS = {
 
 LINESTYLES = {
     "LS": "-",
-    "LMMSE": "-",
+    "Ideal LMMSE": "-",
     "ALMMSE": "-",
     "ChannelNet": "-",
     "ReEsNet": "-",
     "Proposed": "-",
 }
 
-HOLLOW_MARKERS = {"ChannelNet"}
+HOLLOW_MARKERS = {"ChannelNet", "ALMMSE"}
 
 
 def parse_snr(dataset: str) -> float:
@@ -174,12 +174,15 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
 def plot_ber(path: Path, rows: list[dict[str, object]]) -> None:
     plt.rcParams.update(
         {
-            "font.family": "DejaVu Sans",
-            "font.size": 8,
-            "axes.labelsize": 8,
-            "legend.fontsize": 7,
-            "xtick.labelsize": 7,
-            "ytick.labelsize": 7,
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+            "font.size": 6.5,
+            "axes.labelsize": 6.9,
+            "legend.fontsize": 5.9,
+            "xtick.labelsize": 6.2,
+            "ytick.labelsize": 6.2,
+            "axes.linewidth": 0.50,
+            "grid.linewidth": 0.20,
             "savefig.dpi": 300,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
@@ -190,7 +193,7 @@ def plot_ber(path: Path, rows: list[dict[str, object]]) -> None:
         method = str(row["method"])
         if method not in methods:
             methods.append(method)
-    plt.figure(figsize=(3.45, 2.45))
+    plt.figure(figsize=(3.35, 2.12))
     ax = plt.gca()
     for method in methods:
         curve = sorted((row for row in rows if row["method"] == method), key=lambda item: float(item["snr_db"]))
@@ -200,25 +203,37 @@ def plot_ber(path: Path, rows: list[dict[str, object]]) -> None:
             x,
             y,
             marker=MARKERS.get(method, "o"),
-            markersize=4.8 if method == "Proposed" else 4.0,
+            markersize=2.25 if method == "Proposed" else 1.9,
             color=COLORS.get(method),
             linestyle=LINESTYLES.get(method, "-"),
-            linewidth=2.0 if method == "Proposed" else 1.75 if method in {"LMMSE", "ALMMSE"} else 1.45,
-            alpha=1.0 if method in {"Proposed", "LMMSE", "ALMMSE"} else 0.92,
+            linewidth=0.95 if method == "Proposed" else 0.82 if method in {"Ideal LMMSE", "ALMMSE"} else 0.78,
+            alpha=1.0 if method in {"Proposed", "Ideal LMMSE", "ALMMSE"} else 0.88,
             markerfacecolor="white" if method in HOLLOW_MARKERS else COLORS.get(method),
             markeredgecolor=COLORS.get(method),
-            markeredgewidth=0.9,
+            markeredgewidth=0.38,
             label=method,
-            zorder=5 if method == "Proposed" else 4 if method in {"LMMSE", "ALMMSE"} else 3,
+            zorder=5 if method == "Proposed" else 4 if method in {"Ideal LMMSE", "ALMMSE"} else 3,
         )
     ax.set_xlabel("SNR (dB)")
     ax.set_ylabel("BER")
-    ax.grid(True, which="both", linestyle="--", linewidth=0.45, alpha=0.45)
-    ax.legend(ncol=3, frameon=False, loc="upper center", bbox_to_anchor=(0.5, 1.24), columnspacing=0.9)
-    plt.tight_layout(pad=0.25)
+    ax.grid(True, which="both", linestyle="--", alpha=0.30)
+    legend = ax.legend(
+        ncol=2,
+        frameon=True,
+        fancybox=False,
+        framealpha=0.94,
+        edgecolor="#555555",
+        loc="upper right",
+        borderpad=0.22,
+        columnspacing=0.52,
+        handlelength=1.05,
+        handletextpad=0.32,
+    )
+    legend.get_frame().set_linewidth(0.32)
+    plt.tight_layout(pad=0.18)
     path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(path.with_suffix(".png"), bbox_inches="tight")
-    plt.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
+    plt.savefig(path.with_suffix(".png"), bbox_inches="tight", pad_inches=0.015)
+    plt.savefig(path.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.015)
     plt.close()
 
 
@@ -239,8 +254,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--almmse-train", type=Path, default=None)
     parser.add_argument("--almmse-key", default="h_true_grid")
     parser.add_argument("--almmse-batch-frames", type=int, default=512)
-    parser.add_argument("--almmse-time-rank", type=int, default=2)
-    parser.add_argument("--almmse-freq-rank", type=int, default=4)
+    parser.add_argument("--almmse-time-rank", type=int, default=1)
+    parser.add_argument("--almmse-freq-rank", type=int, default=2)
     parser.add_argument("--seed", type=int, default=20260530)
     parser.add_argument("--include-pilots", action="store_true")
     return parser.parse_args()
@@ -305,7 +320,7 @@ def main() -> None:
             paper_mean, paper_cov = paper_stats
             estimates.append(
                 (
-                    "LMMSE",
+                    "Ideal LMMSE",
                     empirical_lmmse_grid_estimate(data, paper_mean, paper_cov),
                     0,
                     str(args.paper_lmmse_train),

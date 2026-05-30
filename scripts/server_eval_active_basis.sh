@@ -9,7 +9,13 @@ TEST_SAMPLES="${TEST_SAMPLES:-4000}"
 DEVICE="${DEVICE:-cuda}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 TOPK="${TOPK:-4,8,12,16,24,32}"
-CHECKPOINT="${CHECKPOINT:-${OUT_ROOT}/pf_msbnet_a/pf_msbnet_grid_best.pt}"
+if [[ -z "${CHECKPOINT:-}" ]]; then
+  if [[ -f "${OUT_ROOT}/pf_msbnet_a_best/pf_msbnet_grid_best.pt" ]]; then
+    CHECKPOINT="${OUT_ROOT}/pf_msbnet_a_best/pf_msbnet_grid_best.pt"
+  else
+    CHECKPOINT="${OUT_ROOT}/pf_msbnet_a/pf_msbnet_grid_best.pt"
+  fi
+fi
 OUTDIR="${OUTDIR:-${OUT_ROOT}/active_basis}"
 
 TESTS=(
