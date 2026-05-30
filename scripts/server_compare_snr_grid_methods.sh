@@ -14,15 +14,22 @@ BATCH_SIZE="${BATCH_SIZE:-256}"
 LMMSE_PROFILE="${LMMSE_PROFILE:-tdl-a}"
 LMMSE_DELAY_SPREAD_NS="${LMMSE_DELAY_SPREAD_NS:-300}"
 INCLUDE_PAPER_LMMSE="${INCLUDE_PAPER_LMMSE:-1}"
-INCLUDE_EMPIRICAL_LMMSE="${INCLUDE_EMPIRICAL_LMMSE:-1}"
-INCLUDE_DELAY_BEM="${INCLUDE_DELAY_BEM:-1}"
+INCLUDE_EMPIRICAL_LMMSE="${INCLUDE_EMPIRICAL_LMMSE:-0}"
+INCLUDE_DELAY_BEM="${INCLUDE_DELAY_BEM:-0}"
 INCLUDE_ORACLE_DELAY_BEM="${INCLUDE_ORACLE_DELAY_BEM:-0}"
-INCLUDE_SPARSE_DELAY_BEM="${INCLUDE_SPARSE_DELAY_BEM:-1}"
+INCLUDE_SPARSE_DELAY_BEM="${INCLUDE_SPARSE_DELAY_BEM:-0}"
 INCLUDE_ORACLE_SPARSE_DELAY_BEM="${INCLUDE_ORACLE_SPARSE_DELAY_BEM:-0}"
 DELAY_BEM_REGULARIZATION="${DELAY_BEM_REGULARIZATION:-1e-2}"
 DELAY_BEM_TIME_ORDER="${DELAY_BEM_TIME_ORDER:-0}"
 DELAY_BEM_TAPS="${DELAY_BEM_TAPS:-}"
 SPARSE_DELAY_BEM_ATOMS="${SPARSE_DELAY_BEM_ATOMS:-4}"
+INCLUDE_SRCNN="${INCLUDE_SRCNN:-0}"
+INCLUDE_CHANNELNET="${INCLUDE_CHANNELNET:-1}"
+INCLUDE_REESNET="${INCLUDE_REESNET:-1}"
+INCLUDE_FIXED_BASIS="${INCLUDE_FIXED_BASIS:-0}"
+INCLUDE_PF_MSB_BASE="${INCLUDE_PF_MSB_BASE:-0}"
+INCLUDE_PROPOSED="${INCLUDE_PROPOSED:-1}"
+INCLUDE_A2="${INCLUDE_A2:-0}"
 
 TESTS=()
 for snr in ${SNR_LIST}; do
@@ -33,25 +40,27 @@ for snr in ${SNR_LIST}; do
 done
 
 CHECKPOINTS=()
-if [[ -f "${OUT_ROOT}/cnn_srcnn/srcnn_grid_best.pt" ]]; then
+if [[ "${INCLUDE_SRCNN}" == "1" && -f "${OUT_ROOT}/cnn_srcnn/srcnn_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "SRCNN=${OUT_ROOT}/cnn_srcnn/srcnn_grid_best.pt")
 fi
-if [[ -f "${OUT_ROOT}/cnn_channelnet/channelnet_grid_best.pt" ]]; then
+if [[ "${INCLUDE_CHANNELNET}" == "1" && -f "${OUT_ROOT}/cnn_channelnet/channelnet_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "ChannelNet=${OUT_ROOT}/cnn_channelnet/channelnet_grid_best.pt")
 fi
-if [[ -f "${OUT_ROOT}/cnn_reesnet/reesnet_grid_best.pt" ]]; then
+if [[ "${INCLUDE_REESNET}" == "1" && -f "${OUT_ROOT}/cnn_reesnet/reesnet_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "ReEsNet=${OUT_ROOT}/cnn_reesnet/reesnet_grid_best.pt")
 fi
-if [[ -f "${OUT_ROOT}/fixed_basis_ridge/fixed_basis_ridge_grid_best.pt" ]]; then
+if [[ "${INCLUDE_FIXED_BASIS}" == "1" && -f "${OUT_ROOT}/fixed_basis_ridge/fixed_basis_ridge_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "Fixed-Basis Ridge=${OUT_ROOT}/fixed_basis_ridge/fixed_basis_ridge_grid_best.pt")
 fi
-if [[ -f "${OUT_ROOT}/pf_msbnet/pf_msbnet_grid_best.pt" ]]; then
+if [[ "${INCLUDE_PF_MSB_BASE}" == "1" && -f "${OUT_ROOT}/pf_msbnet/pf_msbnet_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "PF-MSBNet=${OUT_ROOT}/pf_msbnet/pf_msbnet_grid_best.pt")
 fi
-if [[ -f "${OUT_ROOT}/pf_msbnet_a/pf_msbnet_grid_best.pt" ]]; then
+if [[ "${INCLUDE_PROPOSED}" == "1" && -f "${OUT_ROOT}/pf_msbnet_a_best/pf_msbnet_grid_best.pt" ]]; then
+  CHECKPOINTS+=(--checkpoint "PF-MSBNet-A tuned=${OUT_ROOT}/pf_msbnet_a_best/pf_msbnet_grid_best.pt")
+elif [[ "${INCLUDE_PROPOSED}" == "1" && -f "${OUT_ROOT}/pf_msbnet_a/pf_msbnet_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "PF-MSBNet-A=${OUT_ROOT}/pf_msbnet_a/pf_msbnet_grid_best.pt")
 fi
-if [[ -f "${OUT_ROOT}/pf_msbnet_a2/pf_msbnet_grid_best.pt" ]]; then
+if [[ "${INCLUDE_A2}" == "1" && -f "${OUT_ROOT}/pf_msbnet_a2/pf_msbnet_grid_best.pt" ]]; then
   CHECKPOINTS+=(--checkpoint "PF-MSBNet-A2=${OUT_ROOT}/pf_msbnet_a2/pf_msbnet_grid_best.pt")
 fi
 
