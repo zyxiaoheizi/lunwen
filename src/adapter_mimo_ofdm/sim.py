@@ -344,7 +344,7 @@ def channelnet_uniform_pilot_positions(
     """生成 ChannelNet/DeepPilotDesign 风格的二维均匀导频位置。
 
     ChannelNet 相关代码把信道看成 [72 subcarriers, 14 OFDM symbols]
-    的二维图像，并使用 8/16/24/36/48 个导频点。这里返回的位置格式是
+    的二维图像，并使用 8/16/24/32/36/48 个导频点。这里返回的位置格式是
     [pilot, 2]，每行是 [ofdm_symbol, subcarrier]，方便在我们的
     [batch, symbol, subcarrier, rx, tx] 张量上索引。
     """
@@ -369,6 +369,13 @@ def channelnet_uniform_pilot_positions(
                 + [6 + 14 * i for i in range(4, 72, 9)]
                 + [11 + 14 * i for i in range(1, 72, 9)]
             )
+        elif num_pilots == 32:
+            flat = (
+                [2 + 14 * i for i in range(1, 72, 9)]
+                + [5 + 14 * i for i in range(5, 72, 9)]
+                + [8 + 14 * i for i in range(1, 72, 9)]
+                + [12 + 14 * i for i in range(5, 72, 9)]
+            )
         elif num_pilots == 16:
             flat = [4 + 14 * i for i in range(1, 72, 9)] + [9 + 14 * i for i in range(4, 72, 9)]
         elif num_pilots == 8:
@@ -376,7 +383,7 @@ def channelnet_uniform_pilot_positions(
         elif num_pilots == 4:
             flat = [4 + 14 * 8, 9 + 14 * 26, 4 + 14 * 44, 9 + 14 * 62]
         else:
-            raise ValueError("ChannelNet-style pilot count must be one of 4, 8, 16, 24, 36, 48.")
+            raise ValueError("ChannelNet-style pilot count must be one of 4, 8, 16, 24, 32, 36, 48.")
         return np.asarray([(idx % 14, idx // 14) for idx in flat], dtype=np.int64)
 
     # 非 72x14 时退化为规则网格，保证函数也能用于小规模 sanity check。
